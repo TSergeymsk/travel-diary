@@ -185,7 +185,8 @@ def read_photo(path: Path, use_mtime_fallback: bool) -> Photo | None:
             p.tz = parse_tz_offset(str(tags[key]))
             if p.tz:
                 break
-    if p.tz is not None:
+    # Применяем сразу, чтобы dt сразу был aware (если tz есть)
+    if p.tz is not None and p.dt.tzinfo is None:
         p.dt = p.dt.replace(tzinfo=p.tz)
 
     # ---- GPS ----
@@ -203,9 +204,15 @@ def read_photo(path: Path, use_mtime_fallback: bool) -> Photo | None:
     return p
 
 
-def collect_metadata(root: Path, use_mtime_fallback: bool) -> tuple[list[Photo], dict]:
+def collect_metadata(
+    root: Path,
+    use_mtime_fallback: bool,
+    fallback_tz: timezone,
+) -> tuple[list[Photo], dict]:
     """
     Обходит всю папку, читает метаданные из каждого файла.
+    Все даты приводятся к aware: если в EXIF есть OffsetTimeOriginal —
+    берём его, иначе fallback_tz из конфига.
     Возвращает (список фото с датой, статистика).
     """
     all_files: list[Path] = []
@@ -232,11 +239,18 @@ def collect_metadata(root: Path, use_mtime_fallback: bool) -> tuple[list[Photo],
         if p is None:
             stats["no_dt"] += 1
             continue
+
+        # ---- нормализация даты к aware ----
+        if p.dt is not None and p.dt.tzinfo is None:
+            if p.tz is not None:
+                p.dt = p.dt.replace(tzinfo=p.tz)
+            else:
+                p.dt = p.dt.replace(tzinfo=fallback_tz)
+                stats["no_tz"] += 1
+
         photos.append(p)
         if p.dt_source == "mtime":
             stats["from_mtime"] += 1
-        if p.tz is None:
-            stats["no_tz"] += 1
         if p.lat is None:
             stats["no_gps"] += 1
 
@@ -321,7 +335,6 @@ def interpolate_gps_from_gpx(
         else:
             p_aware = p.dt.replace(tzinfo=fallback_tz)
 
-        # локальная дата в зоне фото
         photo_tz = p.tz or fallback_tz
         local_date = p_aware.astimezone(photo_tz).date()
 
@@ -388,7 +401,16 @@ def cluster_photos(photos: list[Photo], radius_m: float) -> list[Cluster]:
             clusters.append(Cluster(photos=[p], lat=p.lat, lon=p.lon))
     if no_loc:
         clusters.append(Cluster(photos=no_loc))
-    clusters.sort(key=lambda c: min(p.dt for p in c.photos))
+
+    def _cluster_key(c: Cluster):
+        dts = [p.dt for p in c.photos if p.dt]
+        if not dts:
+            return datetime.min.replace(tzinfo=timezone.utc)
+        # страховка от смеси naive/aware
+        aware = [d if d.tzinfo else d.replace(tzinfo=timezone.utc) for d in dts]
+        return min(aware)
+
+    clusters.sort(key=_cluster_key)
     return clusters
 
 
@@ -485,14 +507,22 @@ def dedupe_and_diversify(
     if not photos:
         return []
 
-    photos = sorted(photos, key=lambda p: p.dt)
+    # защита от смеси naive/aware
+    def _key(p: Photo):
+        dt = p.dt
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    photos = sorted(photos, key=_key)
 
     # 1) по времени
     by_time: list[Photo] = []
     last_dt: datetime | None = None
     for p in photos:
         if last_dt is not None:
-            gap = (p.dt - last_dt).total_seconds()
+            p_dt = p.dt if p.dt.tzinfo else p.dt.replace(tzinfo=timezone.utc)
+            l_dt = last_dt if last_dt.tzinfo else last_dt.replace(tzinfo=timezone.utc)
+            gap = (p_dt - l_dt).total_seconds()
             if 0 <= gap < time_window_s:
                 continue
         by_time.append(p)
@@ -541,7 +571,7 @@ def dedupe_and_diversify(
         for k in exhausted:
             del iters[k]
 
-    picked.sort(key=lambda p: p.dt)
+    picked.sort(key=_key)
     return picked[:max_n]
 
 
@@ -734,7 +764,6 @@ def classify_day_clusters(
                             or (c.wiki is not None)
         (majors if c.significant else minors).append(c)
 
-    # Гарантируем хотя бы один слайд на день
     if not majors and day.clusters:
         largest = max(day.clusters, key=lambda c: len(c.photos))
         largest.significant = True
@@ -832,7 +861,9 @@ def main():
     if not args.photos.exists():
         sys.exit(f"Папка не найдена: {args.photos}")
 
-    photos, stats = collect_metadata(args.photos, use_mtime_fallback)
+    fallback_tz = timezone(timedelta(hours=photo_tz_offset))
+    photos, stats = collect_metadata(
+        args.photos, use_mtime_fallback, fallback_tz)
     print(f"      Файлов найдено: {stats['files']}")
     print(f"      С датой:        {len(photos)}")
     if stats["no_dt"]:
@@ -860,8 +891,6 @@ def main():
     by_day = defaultdict(list)
     for p in photos:
         by_day[p.day].append(p)
-
-    fallback_tz = timezone(timedelta(hours=photo_tz_offset))
 
     days: list[Day] = []
     total_km = 0.0
@@ -966,7 +995,6 @@ def main():
                 if len(day.major_clusters) >= day_intro_min_locations:
                     day.day_intro = write_day_intro(text, day, day.distance_km)
                 elif day.major_clusters:
-                    # единственная локация: нарратив локации впитает контекст дня
                     c = day.major_clusters[0]
                     if not c.narrative:
                         c.narrative = write_location_narrative(text, c, day)
@@ -1062,7 +1090,6 @@ def main():
     # Дни
     for i, day in enumerate(days, 1):
         if single_slide_days:
-            # старая логика: один слайд на день
             day_photos = dedupe_and_diversify(
                 day.photos, max_n=max_photos_per_day,
                 time_window_s=dedup_time_window_s,
@@ -1070,7 +1097,7 @@ def main():
                 max_per_cluster=max_photos_per_cluster,
             )
             photos_html = [x for x in (export(p) for p in day_photos) if x]
-            slide = {
+            slides.append({
                 "kind": "day",
                 "index": i,
                 "date": day.date.strftime("%d.%m.%Y"),
@@ -1084,11 +1111,9 @@ def main():
                     for c in day.clusters
                 ],
                 "photos": photos_html,
-            }
-            slides.append(slide)
+            })
             continue
 
-        # Новый режим: с локациями
         # 1) day-intro (только если несколько major)
         if day.day_intro and len(day.major_clusters) >= day_intro_min_locations:
             intro_photos = dedupe_and_diversify(
