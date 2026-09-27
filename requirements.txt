@@ -1,0 +1,8 @@
+pillow>=10.0
+exifread>=3.0
+gpxpy>=1.6
+pyyaml>=6.0
+jinja2>=3.1
+httpx>=0.27
+ollama>=0.4
+openai>=1.50
