@@ -6,6 +6,13 @@
   • старый формат Takeout:      {"locations": [{"timestamp", "latitudeE7", ...}, ...]}
   • новый формат с телефона:    {"semanticSegments": [{"timelinePath": [...], ...}, ...]}
 
+Координаты в новом формате могут быть представлены в нескольких видах:
+  "geo:55.75,37.61"
+  {"latLng": "geo:55.75,37.61"}
+  {"latLng": {"latitudeE7": 557500000, "longitudeE7": 376100000}}
+  {"latitude": 55.75, "longitude": 37.61}
+Все варианты обрабатываются рекурсивно.
+
 На выходе — GPX с одним <trkseg> на каждый календарный день.
 """
 from __future__ import annotations
@@ -17,15 +24,17 @@ from pathlib import Path
 from collections import defaultdict
 
 
+# ============================================================
+#  Разбор времени
+# ============================================================
+
 def parse_iso(s: str) -> datetime | None:
     """Парсит ISO 8601 в разных вариантах (Z, +00:00, доли секунды, без них)."""
     if not s:
         return None
     try:
-        # Python 3.11+ понимает 'Z' из коробки
         dt = datetime.fromisoformat(s)
     except ValueError:
-        # Фоллбэк для старых Python и экзотики
         s2 = s.replace("Z", "+00:00") if s.endswith("Z") else s
         try:
             dt = datetime.fromisoformat(s2)
@@ -41,14 +50,56 @@ def parse_iso(s: str) -> datetime | None:
     return dt
 
 
-# ------------------------------------------------------------
+# ============================================================
+#  Разбор координат — универсальный
+# ============================================================
+
+def geo_to_floats(loc) -> tuple[float, float] | None:
+    """Принимает строку 'geo:lat,lon', dict с latLng, dict с latitudeE7/longitudeE7
+       или dict с latitude/longitude. Возвращает (lat, lon) или None."""
+    if not loc:
+        return None
+
+    # 1) строка "geo:lat,lon"
+    if isinstance(loc, str):
+        s = loc.strip()
+        if s.startswith("geo:"):
+            s = s[4:]
+        try:
+            lat_s, lon_s = s.split(",")
+            return float(lat_s), float(lon_s)
+        except (ValueError, IndexError):
+            return None
+
+    # 2) словарь — рекурсивно спускаемся в latLng / координаты
+    if isinstance(loc, dict):
+        if "latLng" in loc:
+            return geo_to_floats(loc["latLng"])
+        if "latitudeE7" in loc and "longitudeE7" in loc:
+            try:
+                return loc["latitudeE7"] / 1e7, loc["longitudeE7"] / 1e7
+            except (TypeError, KeyError):
+                return None
+        if "latitude" in loc and "longitude" in loc:
+            try:
+                return float(loc["latitude"]), float(loc["longitude"])
+            except (TypeError, ValueError):
+                return None
+        if "location" in loc:
+            return geo_to_floats(loc["location"])
+    return None
+
+
+# ============================================================
 #  Парсеры форматов
-# ------------------------------------------------------------
+# ============================================================
 
 def parse_old_format(data: dict) -> list[tuple[float, float, datetime]]:
     """Старый Takeout: locations[] с timestamp и latitudeE7/longitudeE7."""
     out = []
-    for entry in data.get("locations", []):
+    for entry in data.get("locations", []) or []:
+        if not isinstance(entry, dict):
+            continue
         try:
             lat = entry["latitudeE7"] / 1e7
             lon = entry["longitudeE7"] / 1e7
@@ -61,41 +112,52 @@ def parse_old_format(data: dict) -> list[tuple[float, float, datetime]]:
 
 
 def parse_new_format(data: dict) -> list[tuple[float, float, datetime]]:
-    """Новый формат: semanticSegments[].timelinePath[] + visit/activity."""
+    """Новый формат: semanticSegments[] с timelinePath / visit / activity / rawSignals."""
     out: list[tuple[float, float, datetime]] = []
 
-    def geo_to_floats(loc: str) -> tuple[float, float] | None:
-        if not loc or not loc.startswith("geo:"):
-            return None
-        try:
-            lat_s, lon_s = loc[4:].split(",")
-            return float(lat_s), float(lon_s)
-        except (ValueError, IndexError):
-            return None
+    for seg in data.get("semanticSegments", []) or []:
+        if not isinstance(seg, dict):
+            continue
 
-    for seg in data.get("semanticSegments", []):
-        # 1) точки трека — основной источник
+        # 1) точки трека
         for pt in seg.get("timelinePath", []) or []:
-            coords = geo_to_floats(pt.get("point", ""))
+            if not isinstance(pt, dict):
+                continue
+            coords = geo_to_floats(pt.get("point"))
             dt = parse_iso(pt.get("time", ""))
             if coords and dt:
                 out.append((coords[0], coords[1], dt))
 
-        # 2) посещение места — одна точка
+        # 2) посещение места
         visit = seg.get("visit")
-        if visit:
-            cand = (visit.get("topCandidate") or {})
-            coords = geo_to_floats(cand.get("placeLocation", ""))
+        if isinstance(visit, dict):
+            cand = visit.get("topCandidate") or {}
+            coords = (
+                geo_to_floats(cand.get("placeLocation"))
+                or geo_to_floats(cand.get("placeId"))
+                or geo_to_floats(visit.get("placeLocation"))
+            )
             dt = parse_iso(seg.get("startTime", ""))
             if coords and dt:
                 out.append((coords[0], coords[1], dt))
 
-        # 3) активность (поездка) — start и end
+        # 3) активность (поездка)
         act = seg.get("activity")
-        if act:
+        if isinstance(act, dict):
             for key, tkey in (("start", "startTime"), ("end", "endTime")):
-                coords = geo_to_floats(act.get(key, ""))
+                coords = geo_to_floats(act.get(key))
                 dt = parse_iso(seg.get(tkey, ""))
+                if coords and dt:
+                    out.append((coords[0], coords[1], dt))
+
+        # 4) сырые сигналы (встречаются в некоторых экспортах)
+        for rs in seg.get("rawSignals", []) or []:
+            if not isinstance(rs, dict):
+                continue
+            pos = rs.get("position")
+            if isinstance(pos, dict):
+                coords = geo_to_floats(pos.get("LatLng") or pos.get("latLng"))
+                dt = parse_iso(pos.get("timestamp", ""))
                 if coords and dt:
                     out.append((coords[0], coords[1], dt))
 
@@ -110,15 +172,19 @@ def detect_format(data: dict) -> str:
     return "unknown"
 
 
-# ------------------------------------------------------------
+# ============================================================
 #  GPX-вывод
-# ------------------------------------------------------------
+# ============================================================
 
-def write_gpx(points: list[tuple[float, float, datetime]],
-              output: Path, tz_offset_hours: float = 0.0) -> int:
+def write_gpx(
+    points: list[tuple[float, float, datetime]],
+    output: Path,
+    tz_offset_hours: float = 0.0,
+) -> int:
     """Пишет точки в GPX, разбивая на <trkseg> по локальным дням."""
-    # Сортируем и убираем дубликаты (по времени с точностью до секунды)
     points.sort(key=lambda p: p[2])
+
+    # дедупликация
     seen = set()
     deduped = []
     for lat, lon, dt in points:
@@ -130,7 +196,6 @@ def write_gpx(points: list[tuple[float, float, datetime]],
 
     tz = timezone(timedelta(hours=tz_offset_hours))
 
-    # Группируем по локальной дате
     by_day: dict = defaultdict(list)
     for lat, lon, dt in deduped:
         by_day[dt.astimezone(tz).date()].append((lat, lon, dt))
@@ -156,9 +221,9 @@ def write_gpx(points: list[tuple[float, float, datetime]],
     return len(deduped)
 
 
-# ------------------------------------------------------------
+# ============================================================
 #  CLI
-# ------------------------------------------------------------
+# ============================================================
 
 def main():
     import argparse
@@ -167,7 +232,7 @@ def main():
     ap.add_argument("-o", "--output", type=Path, default=Path("timeline.gpx"))
     ap.add_argument("--tz", type=float, default=0.0,
                     help="смещение локального часового пояса в часах "
-                         "(например, 3 для Москвы). Влияет только на разбивку по дням.")
+                         "(Москва = 3). Влияет только на разбивку по дням.")
     args = ap.parse_args()
 
     if not args.input.exists():
@@ -187,13 +252,14 @@ def main():
         sys.exit("Неизвестный формат JSON — нет ни 'locations', ни 'semanticSegments'.")
 
     if not points:
-        sys.exit("Не удалось извлечь ни одной точки с координатами и временем.")
+        sys.exit("Не удалось извлечь ни одной точки с координатами и временем. "
+                 "Возможно, структура JSON отличается от ожидаемой — "
+                 "смотрите пример сегмента в диагностике.")
 
     print(f"Извлечено точек: {len(points)}")
     written = write_gpx(points, args.output, args.tz)
     print(f"Записано в {args.output}: {written} точек (после дедупликации)")
 
-    # Краткая статистика по дням
     tz = timezone(timedelta(hours=args.tz))
     days = sorted({dt.astimezone(tz).date() for _, _, dt in points})
     if days:
