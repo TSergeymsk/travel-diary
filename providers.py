@@ -5,6 +5,10 @@
 - make_backend()   — фабрика клиентов
 - RoleRunner       — цепочка с fallback на другую роль и hard-truncate
 - Registry         — кэш бэкендов и ролей, управление фазами VRAM
+
+Поддерживает удалённый Ollama: адрес задаётся глобально через
+runtime.ollama_host в config.yaml и наследуется всеми ollama-бэкендами,
+если у конкретного бэкенда не указан собственный host.
 """
 from __future__ import annotations
 
@@ -12,7 +16,7 @@ import base64
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 import httpx
@@ -50,10 +54,11 @@ class BackendConfig:
 # ============================================================
 
 class _OllamaBackend:
-    def __init__(self, cfg: BackendConfig):
+    def __init__(self, cfg: BackendConfig, default_host: str = "http://localhost:11434"):
         import ollama
         self.cfg = cfg
-        self.client = ollama.Client(host=cfg.host or "http://localhost:11434")
+        host = cfg.host or default_host
+        self.client = ollama.Client(host=host)
 
     def _kwargs(self) -> dict:
         if self.cfg.keep_alive:
@@ -128,9 +133,9 @@ class _OpenAIBackend:
         return (r.choices[0].message.content or "").strip()
 
 
-def make_backend(cfg: BackendConfig):
+def make_backend(cfg: BackendConfig, default_ollama_host: str = "http://localhost:11434"):
     if cfg.backend == "ollama":
-        return _OllamaBackend(cfg)
+        return _OllamaBackend(cfg, default_ollama_host)
     if cfg.backend in ("groq", "openrouter", "openai"):
         return _OpenAIBackend(cfg)
     raise ValueError(f"Неизвестный backend: {cfg.backend}")
@@ -141,7 +146,7 @@ def make_backend(cfg: BackendConfig):
 # ============================================================
 
 class OllamaManager:
-    """Загрузка/выгрузка моделей Ollama из VRAM."""
+    """Загрузка/выгрузка моделей Ollama из VRAM. Работает и с удалённым сервером."""
 
     def __init__(self, host: str = "http://localhost:11434"):
         self.host = host.rstrip("/")
@@ -151,11 +156,11 @@ class OllamaManager:
             r = httpx.post(
                 f"{self.host}/api/generate",
                 json={"model": model, "prompt": "", "keep_alive": keep_alive},
-                timeout=180,
+                timeout=300,
             )
             return r.status_code == 200
         except Exception as e:
-            log.warning(f"preload {model}: {e}")
+            log.warning(f"preload {model} @ {self.host}: {e}")
             return False
 
     def unload(self, model: str) -> None:
@@ -166,7 +171,7 @@ class OllamaManager:
                 timeout=30,
             )
         except Exception as e:
-            log.warning(f"unload {model}: {e}")
+            log.warning(f"unload {model} @ {self.host}: {e}")
 
     def loaded(self) -> list[str]:
         try:
@@ -178,6 +183,14 @@ class OllamaManager:
     def unload_all(self) -> None:
         for m in self.loaded():
             self.unload(m)
+
+    def ping(self) -> bool:
+        """Проверка доступности сервера."""
+        try:
+            r = httpx.get(f"{self.host}/api/tags", timeout=5)
+            return r.status_code == 200
+        except Exception:
+            return False
 
 
 @dataclass
@@ -312,17 +325,26 @@ class Registry:
         self._backends: dict[str, Any] = {}
         self._roles: dict[str, RoleRunner] = {}
 
-        host = "http://localhost:11434"
+        # единый host для всего проекта
+        self.ollama_host = (
+            self.runtime.get("ollama_host")
+            or self._host_from_chain(config)
+            or "http://localhost:11434"
+        )
+        self.ollama = OllamaManager(self.ollama_host)
+
+    @staticmethod
+    def _host_from_chain(config: dict) -> str | None:
+        """Совместимость: если ollama_host не задан, ищем явный host в бэкендах."""
         for role_cfg in config.get("roles", {}).values():
             for c in role_cfg.get("chain", []):
                 if c.get("backend") == "ollama" and c.get("host"):
-                    host = c["host"]
-                    break
-        self.ollama = OllamaManager(host)
+                    return c["host"]
+        return None
 
     def get(self, cfg: BackendConfig):
         if cfg.name not in self._backends:
-            self._backends[cfg.name] = make_backend(cfg)
+            self._backends[cfg.name] = make_backend(cfg, self.ollama_host)
         return self._backends[cfg.name]
 
     def role(self, name: str) -> RoleRunner:
@@ -342,7 +364,14 @@ class Registry:
         if not self.runtime.get("phase_mode", True):
             return phase
 
-        print(f"[phase] enter '{role_name}', models: {wanted or '—'}")
+        print(f"[phase] enter '{role_name}' @ {self.ollama_host}, "
+              f"models: {wanted or '—'}")
+
+        # проверка доступности сервера
+        if not self.ollama.ping():
+            print(f"[phase]   ⚠ {self.ollama_host} недоступен — "
+                  f"ollama-бэкенды упадут, сработает fallback")
+
         if self.runtime.get("unload_between_phases", True):
             for m in self.ollama.loaded():
                 if m not in wanted:
@@ -366,7 +395,8 @@ class Registry:
     # ---------- отчёт ----------
 
     def report(self) -> str:
-        lines = ["Отчёт по ролям:"]
+        lines = [f"Ollama host: {self.ollama_host}"]
+        lines.append("Отчёт по ролям:")
         for name, role in self._roles.items():
             ok = sum(1 for a in role.history if a.ok)
             fail = sum(1 for a in role.history if not a.ok)

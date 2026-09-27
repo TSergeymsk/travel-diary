@@ -4,6 +4,13 @@
 
 # ---------- Управление VRAM Ollama ----------
 runtime:
+  # Адрес Ollama-сервера. Если Ollama на другом ПК — укажите его IP.
+  # Примеры:
+  #   http://localhost:11434
+  #   http://192.168.1.50:11434
+  #   http://gpu-server.local:11434
+  ollama_host: http://192.168.1.50:11434
+
   phase_mode: true               # сначала вся vision-фаза, потом вся text-фаза
   preload: true                  # прогревать модель пустым запросом
   unload_between_phases: true    # выгружать модели после фазы
