@@ -21,7 +21,7 @@ import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import exifread
@@ -157,28 +157,38 @@ def load_gpx(path: Path):
         return gpxpy.parse(f)
 
 
-def _collect_track_points_by_day(gpx) -> dict:
-    """Возвращает {date: [(time, lat, lon), ...]} — точки трека, отсортированные по времени."""
+def _collect_track_points_by_day(gpx, photo_tz: timezone) -> dict:
+    """Индексирует точки трека по локальной дате в часовом поясе фотографий.
+       Все времена приводятся к aware-виду (naive → UTC)."""
     by_day: dict = defaultdict(list)
     for track in gpx.tracks:
         for seg in track.segments:
             for pt in seg.points:
-                if pt.time:
-                    by_day[pt.time.date()].append(
-                        (pt.time, pt.latitude, pt.longitude)
-                    )
+                if not pt.time:
+                    continue
+                t = pt.time
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                local_date = t.astimezone(photo_tz).date()
+                by_day[local_date].append((t, pt.latitude, pt.longitude))
     for d in by_day:
         by_day[d].sort(key=lambda x: x[0])
     return by_day
 
 
-def track_distance_for_day(gpx, day_date) -> float:
+def track_distance_for_day(gpx, day_date, photo_tz: timezone) -> float:
     total = 0.0
     prev = None
     for track in gpx.tracks:
         for seg in track.segments:
             for pt in seg.points:
-                if not pt.time or pt.time.date() != day_date:
+                if not pt.time:
+                    prev = None
+                    continue
+                t = pt.time
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                if t.astimezone(photo_tz).date() != day_date:
                     prev = None
                     continue
                 if prev is not None:
@@ -191,13 +201,18 @@ def interpolate_gps_from_gpx(
     photos: list[Photo],
     gpx,
     max_gap_min: int = 30,
+    photo_tz_offset_hours: float = 0.0,
 ) -> int:
     """
     Заполняет координаты фото без GPS из ближайших точек GPX по времени.
-    Интерполирует между двумя соседними точками трека, если фото попало
-    между ними. Возвращает число заполненных фото.
+
+    photo_tz_offset_hours — смещение часового пояса, в котором сняты фото
+    (EXIF DateTimeOriginal всегда naive local). GPX-времена обычно tz-aware UTC.
+    Чтобы их корректно сравнить, наивное локальное время фото переводится
+    в aware через это смещение.
     """
-    by_day = _collect_track_points_by_day(gpx)
+    photo_tz = timezone(timedelta(hours=photo_tz_offset_hours))
+    by_day = _collect_track_points_by_day(gpx, photo_tz)
     if not by_day:
         return 0
 
@@ -208,7 +223,10 @@ def interpolate_gps_from_gpx(
         if p.lat is not None or p.dt is None:
             continue
 
-        # Ищем точки в тот же день, плюс проверяем соседние (на случай перехода через полночь)
+        # делаем dt фото aware в его локальной зоне
+        p_aware = (p.dt if p.dt.tzinfo
+                   else p.dt.replace(tzinfo=photo_tz))
+
         day_pts = by_day.get(p.dt.date(), [])
         if not day_pts:
             for offset in (-1, 1):
@@ -220,16 +238,16 @@ def interpolate_gps_from_gpx(
             continue
 
         times = [t for t, _, _ in day_pts]
-        idx = bisect.bisect_left(times, p.dt)
+        idx = bisect.bisect_left(times, p_aware)
 
         if idx == 0:
             t, la, lo = day_pts[0]
-            if abs(t - p.dt) <= max_gap:
+            if abs(t - p_aware) <= max_gap:
                 p.lat, p.lon, p.gps_source = la, lo, "gpx"
                 filled += 1
         elif idx == len(day_pts):
             t, la, lo = day_pts[-1]
-            if abs(t - p.dt) <= max_gap:
+            if abs(t - p_aware) <= max_gap:
                 p.lat, p.lon, p.gps_source = la, lo, "gpx"
                 filled += 1
         else:
@@ -240,8 +258,8 @@ def interpolate_gps_from_gpx(
                 p.lat, p.lon, p.gps_source = la0, lo0, "gpx"
                 filled += 1
                 continue
-            if abs(t0 - p.dt) <= max_gap or abs(t1 - p.dt) <= max_gap:
-                frac = (p.dt - t0).total_seconds() / total
+            if abs(t0 - p_aware) <= max_gap or abs(t1 - p_aware) <= max_gap:
+                frac = (p_aware - t0).total_seconds() / total
                 p.lat = la0 + (la1 - la0) * frac
                 p.lon = lo0 + (lo1 - lo0) * frac
                 p.gps_source = "gpx"
@@ -392,7 +410,6 @@ def dedupe_and_diversify(
             hashes.append(h)
             after_hash.append(p)
         except Exception:
-            # если файл не открылся — пропускаем молча
             after_hash.append(p)
 
     if len(after_hash) <= max_n:
@@ -550,8 +567,6 @@ def proofread_text(proofread_runner, original: str) -> str:
     """
     if not original or not original.strip():
         return original
-    # reduce_source="" — при полном провале цепочки получим empty_result,
-    # после чего вернём оригинал. Никакого авто-сжатия.
     result = proofread_runner.text(PROOFREAD_SYSTEM, original, reduce_source="")
     return result if result and result.strip() else original
 
@@ -591,7 +606,7 @@ def main():
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s: %(message)s",
     )
-    # Гасим болтливые библиотеки: httpx/httpcore пишут на INFO каждый HTTP-запрос
+    # Гасим болтливые библиотеки
     for noisy in ("httpx", "httpcore", "urllib3", "openai", "ollama",
                   "charset_normalizer", "filelock", "asyncio", "PIL"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
@@ -624,6 +639,7 @@ def main():
     max_photos_per_cluster = proc.get("max_photos_per_cluster", 2)
     gps_interp = proc.get("gps_interpolation_from_gpx", True)
     gps_max_gap = proc.get("gps_interpolation_max_gap_min", 30)
+    gps_photo_tz = proc.get("photo_tz_offset_hours", 0.0)
 
     # ---------- 1. Фото ----------
     print(f"[1/6] Читаю фотографии из {args.photos}")
@@ -638,7 +654,7 @@ def main():
 
     # ---------- Интерполяция GPS из GPX ----------
     if gpx and gps_interp:
-        n_gps = interpolate_gps_from_gpx(photos, gpx, gps_max_gap)
+        n_gps = interpolate_gps_from_gpx(photos, gpx, gps_max_gap, gps_photo_tz)
         if n_gps:
             print(f"      Интерполировано координат из GPX: {n_gps}")
 
@@ -647,12 +663,14 @@ def main():
     for p in photos:
         by_day[p.day].append(p)
 
+    photo_tz = timezone(timedelta(hours=gps_photo_tz))
+
     days: list[Day] = []
     total_km = 0.0
     for d in sorted(by_day):
         day = Day(date=d, photos=by_day[d])
         if gpx:
-            day.distance_km = track_distance_for_day(gpx, d)
+            day.distance_km = track_distance_for_day(gpx, d, photo_tz)
             total_km += day.distance_km
         day.clusters = cluster_photos(day.photos, cluster_radius)
         days.append(day)
