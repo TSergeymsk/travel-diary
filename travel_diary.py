@@ -1135,13 +1135,13 @@ def main():
 
         # 2) Слайды по major-кластерам
         for c in day.major_clusters:
-            cluster_photos = dedupe_and_diversify(
+            picked_photos = dedupe_and_diversify(
                 c.photos, max_n=max_photos_per_location,
                 time_window_s=dedup_time_window_s,
                 hash_threshold=dedup_hash_threshold,
                 max_per_cluster=1,
             )
-            photos_html = [x for x in (export(p) for p in cluster_photos) if x]
+            photos_html = [x for x in (export(p) for p in picked_photos) if x]
             slides.append({
                 "kind": "location",
                 "index": i,
