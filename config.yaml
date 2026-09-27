@@ -10,6 +10,13 @@ runtime:
   unload_between_phases: true
   keep_alive: 30m
 
+  # ---- Retry для облачных бэкендов ----
+  retry:
+    max_attempts: 4         # сколько раз пробовать один и тот же бэкенд
+    base_backoff_s: 2.0     # стартовая пауза (2, 4, 8, 16...)
+    max_backoff_s: 45.0     # потолок одной паузы
+    jitter_s: 1.0           # случайная добавка, чтобы не биться в синхроне
+
 fallback:
   enabled: true
   reduce_role: reduce
@@ -51,25 +58,42 @@ roles:
     fallback_role: reduce
     empty_result: ""
     chain:
-      # 1. Основная модель — 70b на Groq, лучшее качество
       - backend: groq
-        model: llama-3.3-70b-versatile
-        label: groq-70b
+        model: openai/gpt-oss-120b
+        label: groq-120b
         api_key_env: GROQ_API_KEY
         base_url: https://api.groq.com/openai/v1
         temperature: 0.85
         max_tokens: 1200
+        rate_limit:
+          rpm: 25          # у Groq free tier 30 RPM, оставляем запас
+          tpm: 7000        # у Groq free tier 8000 TPM
+          min_interval_s: 0.5
 
-      # 2. Быстрый резерв на Groq, спасает при 429 на 70b
       - backend: groq
-        model: llama-3.1-8b-instant
-        label: groq-8b
+        model: qwen/qwen3.8-27b
+        label: groq-qwen27
         api_key_env: GROQ_API_KEY
         base_url: https://api.groq.com/openai/v1
         temperature: 0.85
         max_tokens: 1200
+        rate_limit:
+          rpm: 25
+          tpm: 7000
+          min_interval_s: 0.5
 
-      # 3. Аварийный роутер OpenRouter — сам выберет свободную free-модель
+      - backend: groq
+        model: openai/gpt-oss-20b
+        label: groq-20b
+        api_key_env: GROQ_API_KEY
+        base_url: https://api.groq.com/openai/v1
+        temperature: 0.85
+        max_tokens: 1200
+        rate_limit:
+          rpm: 25
+          tpm: 7000
+          min_interval_s: 0.5
+
       - backend: openrouter
         model: openrouter/free
         label: openrouter-free-router
@@ -77,27 +101,38 @@ roles:
         base_url: https://openrouter.ai/api/v1
         temperature: 0.85
         max_tokens: 1200
+        rate_limit:
+          rpm: 15
+          tpm: 0           # лимит неизвестен, не ограничиваем по токенам
+          min_interval_s: 1.0
 
   # ============ Proofread: облако, лёгкая модель ============
-  # Правка не требует 70b, поэтому основной — 8b на Groq (много квоты).
   proofread:
     empty_result: ""
     chain:
       - backend: groq
-        model: llama-3.1-8b-instant
-        label: groq-8b-proof
+        model: openai/gpt-oss-20b
+        label: groq-20b-proof
         api_key_env: GROQ_API_KEY
         base_url: https://api.groq.com/openai/v1
         temperature: 0.15
         max_tokens: 1500
+        rate_limit:
+          rpm: 25
+          tpm: 7000
+          min_interval_s: 0.5
 
       - backend: groq
-        model: llama-3.3-70b-versatile
-        label: groq-70b-proof
+        model: openai/gpt-oss-120b
+        label: groq-120b-proof
         api_key_env: GROQ_API_KEY
         base_url: https://api.groq.com/openai/v1
         temperature: 0.15
         max_tokens: 1500
+        rate_limit:
+          rpm: 25
+          tpm: 7000
+          min_interval_s: 0.5
 
       - backend: openrouter
         model: openrouter/free
@@ -106,9 +141,12 @@ roles:
         base_url: https://openrouter.ai/api/v1
         temperature: 0.15
         max_tokens: 1500
+        rate_limit:
+          rpm: 15
+          tpm: 0
+          min_interval_s: 1.0
 
-  # ============ Reduce: локальный, на самый крайний случай ============
-  # Срабатывает только если и Groq, и OpenRouter недоступны.
+  # ============ Reduce: локальный ============
   reduce:
     empty_result: ""
     chain:
@@ -133,25 +171,21 @@ processing:
   max_images_per_cluster: 2
   use_reverse_geocode: true
 
-  # ---- Дедупликация и диверсификация фото ----
   max_photos_per_day: 6
   dedup_time_window_s: 5
   dedup_hash_threshold: 10
   max_photos_per_cluster: 2
 
-  # ---- Интерполяция GPS из GPX ----
   gps_interpolation_from_gpx: true
   gps_interpolation_max_gap_min: 30
   photo_tz_offset_hours: 3
 
-# ---------- Обогащение из интернета ----------
 search:
   enabled: true
   language: ru
   max_chars: 600
   timeout: 8
 
-# ---------- Вывод ----------
 output:
   title: "Моё путешествие"
   theme: dark
