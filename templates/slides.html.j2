@@ -31,7 +31,7 @@
     to   { opacity: 1; transform: none; }
   }
 
-  /* обложка */
+  /* ---- обложка ---- */
   .slide--cover { grid-template-columns: 1fr; place-items: center; text-align: center; }
   .slide--cover .cover-bg {
     position: absolute; inset: 0; z-index: 0;
@@ -49,7 +49,7 @@
     text-transform: uppercase; color: var(--muted);
   }
 
-  /* пролог / финал */
+  /* ---- пролог / финал ---- */
   .slide--intro, .slide--finale { place-items: center; text-align: center; }
   .slide--intro .inner, .slide--finale .inner { max-width: 42em; }
   .slide--intro h2, .slide--finale h2 {
@@ -61,12 +61,75 @@
     line-height: 1.75; white-space: pre-wrap; margin: 0;
   }
 
-  /* день */
-  .slide--day {
+  /* ---- обзор маршрута ---- */
+  .slide--overview { place-items: center; }
+  .slide--overview .inner {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 4vw;
+    max-width: 90em; width: 100%; align-items: start;
+  }
+  .slide--overview h2 {
+    grid-column: 1 / -1;
+    font-size: .9rem; letter-spacing: .35em; text-transform: uppercase;
+    color: var(--accent); margin: 0 0 .4em;
+  }
+  .route-narrative {
+    font-size: 1.1rem; line-height: 1.72; white-space: pre-wrap;
+    color: color-mix(in srgb, var(--fg) 88%, var(--bg));
+  }
+  .route-stops {
+    list-style: none; margin: 0; padding: 0;
+    display: flex; flex-direction: column; gap: .7em;
+    border-left: 2px solid var(--accent); padding-left: 1.2em;
+  }
+  .route-stops li {
+    display: grid;
+    grid-template-columns: 4.5em 3em 1fr auto;
+    gap: .8em; align-items: baseline;
+    font-size: .98rem;
+  }
+  .route-stops .stop-day { color: var(--accent); letter-spacing: .08em; font-size: .78rem; text-transform: uppercase; }
+  .route-stops .stop-date { color: var(--muted); font-size: .82rem; }
+  .route-stops .stop-place { color: var(--fg); }
+  .route-stops .stop-km { color: var(--muted); font-size: .82rem; }
+
+  /* ---- day-intro ---- */
+  .slide--day-intro {
+    grid-template-rows: auto auto 1fr;
+    gap: 3vh; align-content: start;
+  }
+  .day-header { text-align: center; }
+  .day-header .day-meta {
+    font-size: .78rem; letter-spacing: .28em; text-transform: uppercase;
+    color: var(--accent); margin-bottom: .4em;
+  }
+  .day-header h2 {
+    font-size: clamp(1.6rem, 3vw, 2.6rem);
+    margin: 0; font-weight: 500; line-height: 1.15;
+  }
+  .day-header .day-km { color: var(--muted); font-size: .95rem; margin-top: .4em; }
+  .day-intro-text {
+    max-width: 42em; margin: 0 auto;
+    font-size: 1.15rem; line-height: 1.72;
+    text-align: center; white-space: pre-wrap;
+  }
+  .day-photo-strip {
+    display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
+    gap: .8vw; max-height: 40vh; min-height: 0;
+  }
+  .day-photo-strip img {
+    width: 100%; height: 100%; object-fit: cover;
+    border-radius: 6px; display: block; min-height: 0;
+  }
+
+  /* ---- location / день (одна локация = старая логика) ---- */
+  .slide--location, .slide--day {
     grid-template-columns: 1.15fr 1fr;
     gap: 4vw; align-items: center;
   }
-  .slide--day.reverse { grid-template-columns: 1fr 1.15fr; }
+  .slide--location.reverse, .slide--day.reverse {
+    grid-template-columns: 1fr 1.15fr;
+  }
+  .slide--location.reverse .photo-col,
   .slide--day.reverse .photo-col { order: 2; }
 
   .photo-col {
@@ -96,11 +159,23 @@
     font-size: clamp(1.5rem, 2.6vw, 2.3rem);
     margin: 0; font-weight: 500; line-height: 1.15;
   }
+  .text-col .place-name { color: var(--muted); font-size: .95rem; }
   .text-col .day-km { color: var(--muted); font-size: .95rem; }
   .text-col .narrative {
     font-size: 1.05rem; line-height: 1.72;
     white-space: pre-wrap; color: var(--fg);
   }
+  .text-col .wiki {
+    font-size: .92rem; line-height: 1.6; margin-top: .4em;
+    color: color-mix(in srgb, var(--fg) 65%, var(--bg));
+    font-style: italic;
+    border-left: 2px solid var(--line); padding-left: .8em;
+  }
+  .text-col .vision {
+    font-size: .88rem; line-height: 1.55; margin-top: .4em;
+    color: color-mix(in srgb, var(--fg) 55%, var(--bg));
+  }
+
   .clusters {
     display: flex; flex-direction: column; gap: .9em;
     margin-top: .4em; padding-top: 1em; border-top: 1px solid var(--line);
@@ -108,11 +183,9 @@
   .cluster { border-left: 2px solid var(--accent); padding-left: 1em; }
   .cluster h3 {
     font-size: 1.02rem; margin: 0 0 .2em; font-weight: 600;
-    letter-spacing: .01em;
   }
   .cluster .place {
-    font-size: .8rem; color: var(--muted);
-    margin-bottom: .35em; letter-spacing: .05em;
+    font-size: .8rem; color: var(--muted); margin-bottom: .35em;
   }
   .cluster p {
     font-size: .95rem; line-height: 1.6; margin: 0;
@@ -124,7 +197,36 @@
     font-style: italic;
   }
 
-  /* навигация */
+  /* ---- transit (мелкие локации дня) ---- */
+  .slide--transit {
+    grid-template-rows: auto auto 1fr auto;
+    gap: 3vh; align-content: start;
+  }
+  .slide--transit .head { text-align: center; }
+  .slide--transit .head h2 {
+    font-size: clamp(1.3rem, 2.4vw, 2rem);
+    margin: .2em 0 0; font-weight: 500;
+  }
+  .transit-photos {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: .8vw; max-height: 42vh;
+  }
+  .transit-photos img {
+    width: 100%; height: 100%; object-fit: cover;
+    border-radius: 6px; display: block;
+  }
+  .transit-list {
+    display: grid; grid-template-columns: 1fr 1fr; gap: .6em 2em;
+    font-size: .92rem;
+  }
+  .transit-list .item { display: flex; gap: .6em; align-items: baseline; }
+  .transit-list .item .bullet { color: var(--accent); }
+  .transit-list .item .desc {
+    color: color-mix(in srgb, var(--fg) 65%, var(--bg));
+    font-size: .85rem;
+  }
+
+  /* ---- навигация ---- */
   #nav {
     position: fixed; bottom: 2.5vh; left: 0; right: 0;
     display: flex; justify-content: space-between; align-items: center;
@@ -156,6 +258,7 @@
         <div class="sub">{{ s.subtitle }}</div>
         <div class="meta">{{ s.meta }}</div>
       </section>
+
     {% elif s.kind in ('intro', 'finale') %}
       <section class="slide slide--{{ s.kind }}">
         <div class="inner">
@@ -163,6 +266,74 @@
           <p>{{ s.text }}</p>
         </div>
       </section>
+
+    {% elif s.kind == 'overview' %}
+      <section class="slide slide--overview">
+        <div class="inner">
+          <h2>{{ s.title }}</h2>
+          <div class="route-narrative">{{ s.narrative }}</div>
+          <ol class="route-stops">
+            {% for stop in s.stops %}
+              <li>
+                <span class="stop-day">День {{ stop.day }}</span>
+                <span class="stop-date">{{ stop.date }}</span>
+                <span class="stop-place">{{ stop.place }}</span>
+                <span class="stop-km">{{ stop.km }}</span>
+              </li>
+            {% endfor %}
+          </ol>
+        </div>
+      </section>
+
+    {% elif s.kind == 'day-intro' %}
+      <section class="slide slide--day-intro">
+        <div class="day-header">
+          <div class="day-meta">День {{ s.index }} · {{ s.date }}</div>
+          <h2>{{ s.title }}</h2>
+          {% if s.meta %}<div class="day-km">{{ s.meta }}</div>{% endif %}
+        </div>
+        <p class="day-intro-text">{{ s.narrative }}</p>
+        <div class="day-photo-strip">
+          {% for p in s.photos %}<img src="{{ p }}" alt="" loading="lazy">{% endfor %}
+        </div>
+      </section>
+
+    {% elif s.kind == 'location' %}
+      <section class="slide slide--location{% if s.index % 2 == 0 %} reverse{% endif %}">
+        <div class="photo-col count-{{ s.photos|length }}">
+          {% for p in s.photos %}<img src="{{ p }}" alt="" loading="lazy">{% endfor %}
+        </div>
+        <div class="text-col">
+          <div class="day-meta">День {{ s.index }} · {{ s.date }}</div>
+          <h2>{{ s.title }}</h2>
+          {% if s.place %}<div class="place-name">{{ s.place }}</div>{% endif %}
+          {% if s.meta %}<div class="day-km">{{ s.meta }}</div>{% endif %}
+          {% if s.narrative %}<div class="narrative">{{ s.narrative }}</div>{% endif %}
+          {% if s.wiki %}<p class="wiki">{{ s.wiki }}</p>{% endif %}
+          {% if s.description %}<p class="vision">{{ s.description }}</p>{% endif %}
+        </div>
+      </section>
+
+    {% elif s.kind == 'transit' %}
+      <section class="slide slide--transit">
+        <div class="head">
+          <div class="day-meta">День {{ s.index }} · {{ s.date }}</div>
+          <h2>Между локациями</h2>
+        </div>
+        <div class="transit-photos">
+          {% for p in s.photos %}<img src="{{ p }}" alt="" loading="lazy">{% endfor %}
+        </div>
+        <div class="transit-list">
+          {% for c in s.clusters %}
+            <div class="item">
+              <span class="bullet">·</span>
+              <span class="place">{{ c.place or '—' }}</span>
+              {% if c.description %}<span class="desc">{{ c.description[:140] }}</span>{% endif %}
+            </div>
+          {% endfor %}
+        </div>
+      </section>
+
     {% elif s.kind == 'day' %}
       <section class="slide slide--day{% if s.index % 2 == 0 %} reverse{% endif %}">
         <div class="photo-col count-{{ s.photos|length }}">
@@ -179,6 +350,7 @@
                 <div class="cluster">
                   <h3>{{ c.title }}</h3>
                   {% if c.place %}<div class="place">{{ c.place }}</div>{% endif %}
+                  {% if c.narrative %}<p>{{ c.narrative }}</p>{% endif %}
                   {% if c.description %}<p>{{ c.description }}</p>{% endif %}
                   {% if c.wiki %}<p class="wiki">{{ c.wiki }}</p>{% endif %}
                 </div>

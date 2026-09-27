@@ -1,6 +1,5 @@
 # ============================================================
 #  Travel Diary — конфигурация
-#  Зрение — локально (Ollama), тексты — в облако (Groq/OpenRouter).
 # ============================================================
 
 runtime:
@@ -10,12 +9,11 @@ runtime:
   unload_between_phases: true
   keep_alive: 30m
 
-  # ---- Retry для облачных бэкендов ----
   retry:
-    max_attempts: 4         # сколько раз пробовать один и тот же бэкенд
-    base_backoff_s: 2.0     # стартовая пауза (2, 4, 8, 16...)
-    max_backoff_s: 45.0     # потолок одной паузы
-    jitter_s: 1.0           # случайная добавка, чтобы не биться в синхроне
+    max_attempts: 4
+    base_backoff_s: 2.0
+    max_backoff_s: 45.0
+    jitter_s: 1.0
 
 fallback:
   enabled: true
@@ -25,7 +23,6 @@ fallback:
 
 roles:
 
-  # ============ Vision: локально ============
   vision:
     fallback_role: reduce
     empty_result: "Кадры этого места"
@@ -53,7 +50,6 @@ roles:
         max_tokens: 300
         num_ctx: 2048
 
-  # ============ Text: облако ============
   text:
     fallback_role: reduce
     empty_result: ""
@@ -66,8 +62,8 @@ roles:
         temperature: 0.85
         max_tokens: 1200
         rate_limit:
-          rpm: 25          # у Groq free tier 30 RPM, оставляем запас
-          tpm: 7000        # у Groq free tier 8000 TPM
+          rpm: 25
+          tpm: 7000
           min_interval_s: 0.5
 
       - backend: groq
@@ -103,10 +99,9 @@ roles:
         max_tokens: 1200
         rate_limit:
           rpm: 15
-          tpm: 0           # лимит неизвестен, не ограничиваем по токенам
+          tpm: 0
           min_interval_s: 1.0
 
-  # ============ Proofread: облако, лёгкая модель ============
   proofread:
     empty_result: ""
     chain:
@@ -146,7 +141,6 @@ roles:
           tpm: 0
           min_interval_s: 1.0
 
-  # ============ Reduce: локальный ============
   reduce:
     empty_result: ""
     chain:
@@ -163,22 +157,34 @@ roles:
         max_tokens: 250
         num_ctx: 4096
 
-# ---------- Параметры обработки ----------
 processing:
+  # ---- Изображения ----
   vision_max_side: 512
   export_max_side: 1600
   cluster_radius_m: 400
   max_images_per_cluster: 2
   use_reverse_geocode: true
 
+  # ---- Метаданные ----
+  use_file_mtime_fallback: true        # если EXIF-дата отсутствует — брать mtime
+  photo_tz_offset_hours: 3             # fallback, если нет OffsetTimeOriginal в EXIF
+
+  # ---- Дедупликация и диверсификация ----
   max_photos_per_day: 6
+  max_photos_per_location: 4           # сколько фото на слайде одной локации
   dedup_time_window_s: 5
   dedup_hash_threshold: 10
   max_photos_per_cluster: 2
 
+  # ---- Значимость локаций ----
+  significant_min_photos: 3            # ≥ N фото → кластер становится слайдом
+  significant_require_wiki: false      # если true — только кластеры со статьёй
+  day_intro_min_locations: 2           # слайд-вступление дня при ≥ N значимых
+  generate_route_overview: true        # делать общий слайд о маршруте
+
+  # ---- Интерполяция GPS ----
   gps_interpolation_from_gpx: true
   gps_interpolation_max_gap_min: 30
-  photo_tz_offset_hours: 3
 
 search:
   enabled: true
@@ -188,4 +194,4 @@ search:
 
 output:
   title: "Моё путешествие"
-  theme: dark
+  theme: light
