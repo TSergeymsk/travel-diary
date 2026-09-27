@@ -6,7 +6,7 @@ travel_diary.py — генерирует HTML-дневник путешеств�
   1. Метаданные   — обход всех файлов, EXIF + mtime-fallback + tz-offset
   2. GPX          — расстояния по дням + интерполяция GPS
   3. Кластеры     — группировка фото по дням и локациям
-  4. Геокодинг    — Nominatim + Википедия
+  4. Геокодинг    — Nominatim + Википедия (геопоиск по координатам)
   5. Фаза VISION  — описания кадров для каждого кластера
   6. Классификация — major/minor локации
   7. Фаза TEXT    — заголовки, рассказы по локациям, вступления дней,
@@ -21,6 +21,7 @@ import bisect
 import io
 import logging
 import math
+import re
 import sys
 import time
 from collections import defaultdict
@@ -71,6 +72,15 @@ def parse_tz_offset(s: str) -> timezone | None:
         return None
 
 
+def dedup_consecutive(items: list[str]) -> list[str]:
+    """Убирает подряд идущие одинаковые строки."""
+    out: list[str] = []
+    for x in items:
+        if not out or out[-1] != x:
+            out.append(x)
+    return out
+
+
 # ============================================================
 #  Модели данных
 # ============================================================
@@ -84,7 +94,7 @@ class Photo:
     camera: str | None = None
     gps_source: str | None = None       # 'exif' | 'gpx' | None
     dt_source: str | None = None        # 'exif' | 'mtime'
-    tz: timezone | None = None          # из EXIF OffsetTimeOriginal, если есть
+    tz: timezone | None = None
     _phash: int | None = field(default=None, repr=False)
 
     @property
@@ -92,7 +102,6 @@ class Photo:
         return self.dt.date() if self.dt else None
 
     def phash(self) -> int | None:
-        """Ленивый перцептивный хеш."""
         if self._phash is None:
             try:
                 img = Image.open(self.path)
@@ -111,8 +120,8 @@ class Cluster:
     place: str | None = None
     wiki: str | None = None
     title: str = ""
-    description: str = ""               # от vision
-    narrative: str = ""                 # от text (только для major)
+    description: str = ""
+    narrative: str = ""
     significant: bool = False
 
     @property
@@ -158,7 +167,6 @@ def read_photo(path: Path, use_mtime_fallback: bool) -> Photo | None:
     except Exception:
         return None
 
-    # ---- Дата съёмки ----
     for key in ("EXIF DateTimeOriginal", "Image DateTime", "EXIF DateTimeDigitized"):
         if key in tags:
             try:
@@ -178,18 +186,15 @@ def read_photo(path: Path, use_mtime_fallback: bool) -> Photo | None:
     if p.dt is None:
         return None
 
-    # ---- Часовой пояс снимка из EXIF ----
     for key in ("EXIF OffsetTimeOriginal", "EXIF OffsetTime",
                 "EXIF OffsetTimeDigitized"):
         if key in tags:
             p.tz = parse_tz_offset(str(tags[key]))
             if p.tz:
                 break
-    # Применяем сразу, чтобы dt сразу был aware (если tz есть)
     if p.tz is not None and p.dt.tzinfo is None:
         p.dt = p.dt.replace(tzinfo=p.tz)
 
-    # ---- GPS ----
     try:
         p.lat = dms_to_deg(tags["GPS GPSLatitude"].values,
                            tags["GPS GPSLatitudeRef"].values)
@@ -209,12 +214,7 @@ def collect_metadata(
     use_mtime_fallback: bool,
     fallback_tz: timezone,
 ) -> tuple[list[Photo], dict]:
-    """
-    Обходит всю папку, читает метаданные из каждого файла.
-    Все даты приводятся к aware: если в EXIF есть OffsetTimeOriginal —
-    берём его, иначе fallback_tz из конфига.
-    Возвращает (список фото с датой, статистика).
-    """
+    """Обходит всю папку, читает метаданные. Все даты — aware."""
     all_files: list[Path] = []
     for path in sorted(root.rglob("*")):
         if path.is_file() and path.suffix.lower() in EXTS:
@@ -240,7 +240,6 @@ def collect_metadata(
             stats["no_dt"] += 1
             continue
 
-        # ---- нормализация даты к aware ----
         if p.dt is not None and p.dt.tzinfo is None:
             if p.tz is not None:
                 p.dt = p.dt.replace(tzinfo=p.tz)
@@ -268,7 +267,6 @@ def load_gpx(path: Path):
 
 
 def _collect_track_points_by_day(gpx, photo_tz: timezone) -> dict:
-    """Индексирует точки трека по локальной дате в часовом поясе фотографий."""
     by_day: dict = defaultdict(list)
     for track in gpx.tracks:
         for seg in track.segments:
@@ -312,11 +310,6 @@ def interpolate_gps_from_gpx(
     max_gap_min: int = 30,
     fallback_tz_offset_hours: float = 0.0,
 ) -> int:
-    """
-    Заполняет координаты фото без GPS из ближайших точек GPX по времени.
-    Если у фото есть tz (из EXIF OffsetTimeOriginal) — используется он,
-    иначе fallback_tz_offset_hours.
-    """
     fallback_tz = timezone(timedelta(hours=fallback_tz_offset_hours))
     by_day = _collect_track_points_by_day(gpx, fallback_tz)
     if not by_day:
@@ -329,7 +322,6 @@ def interpolate_gps_from_gpx(
         if p.lat is not None or p.dt is None:
             continue
 
-        # aware-время фото: либо из EXIF tz, либо fallback
         if p.dt.tzinfo is not None:
             p_aware = p.dt
         else:
@@ -406,7 +398,6 @@ def cluster_photos(photos: list[Photo], radius_m: float) -> list[Cluster]:
         dts = [p.dt for p in c.photos if p.dt]
         if not dts:
             return datetime.min.replace(tzinfo=timezone.utc)
-        # страховка от смеси naive/aware
         aware = [d if d.tzinfo else d.replace(tzinfo=timezone.utc) for d in dts]
         return min(aware)
 
@@ -474,8 +465,6 @@ def export_photo(src: Path, dst: Path, max_side: int) -> None:
     img.save(dst, format="JPEG", quality=85, optimize=True)
 
 
-# ---------- Перцептивный хеш ----------
-
 def _phash_value(img: Image.Image, size: int = 8) -> int:
     g = img.convert("L").resize((size, size), _LANCZOS)
     pixels = list(g.getdata())
@@ -497,17 +486,10 @@ def dedupe_and_diversify(
     hash_threshold: int = 10,
     max_per_cluster: int = 2,
 ) -> list[Photo]:
-    """
-    Возвращает до max_n разных фото:
-      1) убирает снимки, сделанные подряд в пределах time_window_s секунд;
-      2) убирает визуально похожие (перцептивный хеш);
-      3) ограничивает вклад одного географического кластера;
-      4) распределяет выборку round-robin по кластерам.
-    """
+    """Возвращает до max_n разных фото по времени/хешу/кластеру."""
     if not photos:
         return []
 
-    # защита от смеси naive/aware
     def _key(p: Photo):
         dt = p.dt
         if dt.tzinfo is None:
@@ -515,7 +497,6 @@ def dedupe_and_diversify(
         return dt
     photos = sorted(photos, key=_key)
 
-    # 1) по времени
     by_time: list[Photo] = []
     last_dt: datetime | None = None
     for p in photos:
@@ -528,7 +509,6 @@ def dedupe_and_diversify(
         by_time.append(p)
         last_dt = p.dt
 
-    # 2) по перцептивному хешу (с кэшем в Photo._phash)
     after_hash: list[Photo] = []
     hashes: list[int] = []
     for p in by_time:
@@ -544,7 +524,6 @@ def dedupe_and_diversify(
     if len(after_hash) <= max_n:
         return after_hash
 
-    # 3) группируем по кластерам
     by_cluster: dict = defaultdict(list)
     for p in after_hash:
         if p.lat is not None and p.lon is not None:
@@ -556,7 +535,6 @@ def dedupe_and_diversify(
     for k in by_cluster:
         by_cluster[k] = by_cluster[k][:max_per_cluster]
 
-    # 4) round-robin
     iters = {k: iter(v) for k, v in by_cluster.items()}
     picked: list[Photo] = []
     while len(picked) < max_n and iters:
@@ -583,7 +561,11 @@ VISION_PROMPT = (
     "Ты рассматриваешь фотографии из личного путешествия. "
     "Опиши в 2–4 предложениях, что на них видно: обстановка, свет, люди, детали. "
     "Пиши живым языком, без списков, без вступлений вроде «на фото изображено». "
-    "Если несколько кадров про одно место — расскажи про место в целом."
+    "Если несколько кадров про одно место — расскажи про место в целом.\n"
+    "Важно: если кадр снят через окно транспортного средства (самолёта, "
+    "поезда, автобуса, машины), так и напиши: «вид из окна самолёта», "
+    "«вид из окна поезда». Не интерпретируй облака, туман или засветку как "
+    "снег или зимний пейзаж без других явных признаков зимы."
 )
 
 TITLE_SYSTEM = (
@@ -624,11 +606,17 @@ FINALE_SYSTEM = (
 
 PROOFREAD_SYSTEM = (
     "Ты — литературный редактор. Тебе дают фрагмент русскоязычного текста, "
-    "в котором могут быть случайные вставки на других языках (китайские "
-    "иероглифы, английские слова, латиница, транслит) и опечатки. "
-    "Замени иноязычные вставки осмысленными русскими словами по контексту. "
-    "Исправь явные опечатки и согласование. Сохрани авторский стиль, тон, "
-    "структуру абзацев, имена собственные и числа. "
+    "в котором могут быть случайные вставки на других языках и опечатки.\n"
+    "Правила:\n"
+    "1. Любое слово латиницей (t-shirt, balustrade, masts, cafe, showroom, "
+    "Tissot) замени русским эквивалентом (футболка, балюстрада, мачты, кафе, "
+    "шоу-рум, Тиссо). Если это имя бренда или название — оставь, но проверь, "
+    "что оно написано корректно и не искажено.\n"
+    "2. Иероглифы (китайские, японские и любые другие) замени осмысленными "
+    "русскими словами по контексту.\n"
+    "3. Транслит (например «paлto») исправь на нормальное написание («пальто»).\n"
+    "4. Исправь опечатки и согласование.\n"
+    "5. Сохрани авторский стиль, тон, структуру абзацев, имена собственные и числа.\n"
     "Верни только исправленный текст, без комментариев, без кавычек, "
     "без вводных фраз вроде «Вот исправленный текст»."
 )
@@ -740,6 +728,24 @@ def proofread_text(proofread_runner, original: str) -> str:
 
 
 # ============================================================
+#  Постобработка: дедуп вики и подряд идущих мест
+# ============================================================
+
+def dedup_wiki_texts(days: list[Day]) -> None:
+    """Одинаковый текст Википедии оставляем только на первом слайде."""
+    seen: set[int] = set()
+    for day in days:
+        for c in day.clusters:
+            if not c.wiki:
+                continue
+            h = hash(c.wiki[:200])
+            if h in seen:
+                c.wiki = None
+            else:
+                seen.add(h)
+
+
+# ============================================================
 #  Классификация
 # ============================================================
 
@@ -748,7 +754,6 @@ def classify_day_clusters(
     significant_min_photos: int,
     require_wiki: bool,
 ) -> None:
-    """Разбивает кластеры дня на major (свои слайды) и minor (общий слайд)."""
     majors: list[Cluster] = []
     minors: list[Cluster] = []
 
@@ -772,6 +777,35 @@ def classify_day_clusters(
 
     day.major_clusters = majors
     day.minor_clusters = minors
+
+
+# ============================================================
+#  Выбор обложки
+# ============================================================
+
+def pick_cover(days: list[Day], dedup_kwargs: dict) -> Photo | None:
+    """
+    Обложка из середины поездки. Приоритет — дневные кадры (10:00–18:00),
+    чтобы не брать ночные из аэропорта или из окна самолёта в темноте.
+    """
+    if not days:
+        return None
+
+    # пробуем средний день; если пустой — соседние по расстоянию
+    mid = len(days) // 2
+    order = sorted(range(len(days)), key=lambda i: abs(i - mid))
+    for idx in order:
+        day = days[idx]
+        # сначала пробуем дневные фото
+        day_photos = [p for p in day.photos
+                      if p.dt and 10 <= p.dt.hour <= 18]
+        pool = day_photos or day.photos
+        if not pool:
+            continue
+        picked = dedupe_and_diversify(pool, max_n=1, **dedup_kwargs)
+        if picked:
+            return picked[0]
+    return None
 
 
 # ============================================================
@@ -851,6 +885,10 @@ def main():
     day_intro_min_locations = proc.get("day_intro_min_locations", 2)
     generate_route_overview = proc.get("generate_route_overview", True)
 
+    # ---- параметры transit-слайда ----
+    transit_min_clusters = proc.get("transit_min_clusters", 2)
+    transit_min_photos = proc.get("transit_min_photos", 3)
+
     gps_interp = proc.get("gps_interpolation_from_gpx", True)
     gps_max_gap = proc.get("gps_interpolation_max_gap_min", 30)
 
@@ -916,16 +954,21 @@ def main():
         for c in day.clusters:
             if do_geocode and c.lat is not None:
                 c.place = reverse_geocode(c.lat, c.lon)
-            if search_cfg.get("enabled") and c.place:
-                toponym = c.place.split(",")[0].strip()
+            if search_cfg.get("enabled") and (c.place or c.lat is not None):
                 c.wiki = wiki_summary(
-                    toponym,
+                    c.place,
+                    lat=c.lat,
+                    lon=c.lon,
                     lang=search_cfg.get("language", "ru"),
                     max_chars=search_cfg.get("max_chars", 600),
                     timeout=search_cfg.get("timeout", 8),
                 )
                 if c.wiki:
-                    print(f"      · {toponym}: {c.wiki[:60]}…")
+                    tag = c.place or f"{c.lat:.3f},{c.lon:.3f}"
+                    print(f"      · {tag}: {c.wiki[:60]}…")
+
+    # Дедуп вики-текстов между кластерами
+    dedup_wiki_texts(days)
 
     # ---------- 5. ФАЗА A: VISION ----------
     if not args.skip_vision:
@@ -953,14 +996,12 @@ def main():
     phase_roles = ["text"] + (["proofread"] if do_proof else [])
     phase_b = registry.begin_phase(*phase_roles)
     try:
-        # 1) Заголовки кластеров
         print("      заголовки локаций…")
         for day in days:
             for c in day.clusters:
                 c.title = (make_cluster_title(text, c) if c.description
                            else (c.place or "Кадры"))
 
-        # 2) Классификация major/minor
         if single_slide_days:
             for day in days:
                 day.major_clusters = day.clusters
@@ -972,14 +1013,12 @@ def main():
                 classify_day_clusters(
                     day, significant_min_photos, significant_require_wiki)
 
-        # 3) Сводки дня
         for day in days:
-            uniq = list(dict.fromkeys(
-                c.place for c in day.major_clusters if c.place))
-            day.places_summary = " → ".join(uniq)
+            places = [c.place for c in day.major_clusters if c.place]
+            places = dedup_consecutive(places)
+            day.places_summary = " → ".join(places)
             day.title = day.places_summary or day.date.strftime("%d.%m.%Y")
 
-        # 4) Рассказы по локациям
         if not single_slide_days:
             print("      рассказы по локациям…")
             for day in days:
@@ -988,7 +1027,6 @@ def main():
                         print(f"        · {day.date} · {c.place or '—'}")
                         c.narrative = write_location_narrative(text, c, day)
 
-        # 5) Вступления дней
         if not single_slide_days:
             print("      вступления дней…")
             for day in days:
@@ -999,17 +1037,14 @@ def main():
                     if not c.narrative:
                         c.narrative = write_location_narrative(text, c, day)
 
-        # 6) Обзор маршрута
         if generate_route_overview and len(days) > 1:
             print("      обзор маршрута…")
             route_overview = write_route_overview(text, days, total_km)
 
-        # 7) Пролог и финал
         print("      пролог и финал…")
         intro = write_intro(text, days, total_km)
         finale = write_finale(text, days, total_km)
 
-        # 8) Вычитка
         if do_proof:
             print("      вычитка текстов…")
             for day in days:
@@ -1047,14 +1082,15 @@ def main():
 
     slides: list[dict] = []
 
-    # Обложка
-    cover_pool = dedupe_and_diversify(
-        days[0].photos, max_n=1,
-        time_window_s=dedup_time_window_s,
-        hash_threshold=dedup_hash_threshold,
-        max_per_cluster=1,
-    )
-    cover_photo = export(cover_pool[0]) if cover_pool else export(days[0].photos[0])
+    # ---- обложка из середины ----
+    dedup_kwargs = {
+        "time_window_s": dedup_time_window_s,
+        "hash_threshold": dedup_hash_threshold,
+        "max_per_cluster": 1,
+    }
+    cover_photo_obj = pick_cover(days, dedup_kwargs)
+    cover_photo = export(cover_photo_obj) if cover_photo_obj else ""
+
     slides.append({
         "kind": "cover",
         "title": cfg.get("output", {}).get("title", "Моё путешествие"),
@@ -1064,14 +1100,15 @@ def main():
         "meta": f"{len(days)} дней · {total_km:.0f} км · {len(photos)} кадров",
     })
 
-    # Пролог
+    # ---- пролог ----
     slides.append({"kind": "intro", "title": "Пролог", "text": intro})
 
-    # Обзор маршрута
+    # ---- обзор маршрута ----
     if route_overview:
         stops: list[dict] = []
         for i, d in enumerate(days, 1):
             places = [c.place for c in d.major_clusters if c.place]
+            places = dedup_consecutive(places)
             if not places:
                 continue
             stops.append({
@@ -1087,7 +1124,7 @@ def main():
             "stops": stops,
         })
 
-    # Дни
+    # ---- дни ----
     for i, day in enumerate(days, 1):
         if single_slide_days:
             day_photos = dedupe_and_diversify(
@@ -1114,7 +1151,7 @@ def main():
             })
             continue
 
-        # 1) day-intro (только если несколько major)
+        # day-intro
         if day.day_intro and len(day.major_clusters) >= day_intro_min_locations:
             intro_photos = dedupe_and_diversify(
                 day.photos, max_n=max_photos_per_day,
@@ -1133,7 +1170,7 @@ def main():
                 "photos": intro_photos_html,
             })
 
-        # 2) Слайды по major-кластерам
+        # слайды локаций
         for c in day.major_clusters:
             picked_photos = dedupe_and_diversify(
                 c.photos, max_n=max_photos_per_location,
@@ -1156,9 +1193,11 @@ def main():
                 "photos": photos_html,
             })
 
-        # 3) Transit-слайд для minor
+        # transit для minor — только если содержательный
         minor_with_photos = [c for c in day.minor_clusters if c.photos]
-        if minor_with_photos:
+        total_minor_photos = sum(len(c.photos) for c in minor_with_photos)
+        if (len(minor_with_photos) >= transit_min_clusters
+                and total_minor_photos >= transit_min_photos):
             transit_pool: list[Photo] = []
             for c in minor_with_photos:
                 transit_pool.extend(c.photos)
@@ -1174,13 +1213,13 @@ def main():
                 "index": i,
                 "date": day.date.strftime("%d.%m.%Y"),
                 "clusters": [
-                    {"place": c.place, "description": c.description}
+                    {"place": c.place or "Без локации",
+                     "description": c.description}
                     for c in minor_with_photos
                 ],
                 "photos": photos_html,
             })
 
-    # Финал
     slides.append({"kind": "finale", "title": "Послесловие", "text": finale})
 
     print("[7/7] Сборка HTML")

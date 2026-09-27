@@ -119,9 +119,10 @@
   .day-photo-strip img {
     width: 100%; height: 100%; object-fit: cover;
     border-radius: 6px; display: block; min-height: 0;
+    cursor: zoom-in;
   }
 
-  /* ---- location / день (одна локация = старая логика) ---- */
+  /* ---- location / day ---- */
   .slide--location, .slide--day {
     grid-template-columns: 1.15fr 1fr;
     gap: 4vw; align-items: center;
@@ -139,6 +140,7 @@
   .photo-col img {
     width: 100%; height: 100%; object-fit: cover;
     border-radius: 6px; min-height: 0; display: block;
+    cursor: zoom-in;
   }
   .photo-col.count-1 { grid-template-columns: 1fr; }
   .photo-col.count-1 img { max-height: 76vh; }
@@ -197,7 +199,7 @@
     font-style: italic;
   }
 
-  /* ---- transit (мелкие локации дня) ---- */
+  /* ---- transit ---- */
   .slide--transit {
     grid-template-rows: auto auto 1fr auto;
     gap: 3vh; align-content: start;
@@ -213,7 +215,7 @@
   }
   .transit-photos img {
     width: 100%; height: 100%; object-fit: cover;
-    border-radius: 6px; display: block;
+    border-radius: 6px; display: block; cursor: zoom-in;
   }
   .transit-list {
     display: grid; grid-template-columns: 1fr 1fr; gap: .6em 2em;
@@ -226,7 +228,61 @@
     font-size: .85rem;
   }
 
-  /* ---- навигация ---- */
+  /* ---- lightbox ---- */
+  .lightbox {
+    position: fixed; inset: 0; z-index: 100;
+    display: none;
+    background: rgba(0, 0, 0, .92);
+    backdrop-filter: blur(4px);
+    align-items: center; justify-content: center;
+    animation: lb-fade .15s ease;
+  }
+  .lightbox.open { display: flex; }
+  @keyframes lb-fade {
+    from { opacity: 0; } to { opacity: 1; }
+  }
+  .lb-img {
+    max-width: 92vw; max-height: 88vh;
+    object-fit: contain;
+    border-radius: 4px;
+    box-shadow: 0 20px 60px rgba(0,0,0,.5);
+    user-select: none;
+  }
+  .lb-btn {
+    position: absolute;
+    background: rgba(0,0,0,.4);
+    border: 1px solid rgba(255,255,255,.2);
+    color: #eee;
+    font: inherit;
+    cursor: pointer;
+    border-radius: 999px;
+    display: flex; align-items: center; justify-content: center;
+    transition: background .15s, border-color .15s;
+    user-select: none;
+  }
+  .lb-btn:hover { background: rgba(0,0,0,.7); border-color: var(--accent); }
+  .lb-close {
+    top: 2.5vh; right: 2.5vw;
+    width: 2.8em; height: 2.8em;
+    font-size: 1.4rem; line-height: 1;
+  }
+  .lb-prev, .lb-next {
+    top: 50%; transform: translateY(-50%);
+    width: 3.2em; height: 3.2em;
+    font-size: 1.6rem; line-height: 1;
+  }
+  .lb-prev { left: 2.5vw; }
+  .lb-next { right: 2.5vw; }
+  .lb-prev::before { content: "‹"; }
+  .lb-next::before { content: "›"; }
+  .lb-counter {
+    position: absolute; bottom: 3vh; left: 50%; transform: translateX(-50%);
+    color: #ccc; font-size: .95rem; letter-spacing: .15em;
+    padding: .3em 1em; border-radius: 999px;
+    background: rgba(0,0,0,.4);
+  }
+
+  /* ---- навигация слайдов ---- */
   #nav {
     position: fixed; bottom: 2.5vh; left: 0; right: 0;
     display: flex; justify-content: space-between; align-items: center;
@@ -328,7 +384,7 @@
             <div class="item">
               <span class="bullet">·</span>
               <span class="place">{{ c.place or '—' }}</span>
-              {% if c.description %}<span class="desc">{{ c.description[:140] }}</span>{% endif %}
+              {% if c.description %}<span class="desc">{{ c.description }}</span>{% endif %}
             </div>
           {% endfor %}
         </div>
@@ -363,6 +419,15 @@
   {% endfor %}
 </div>
 
+<!-- lightbox -->
+<div id="lightbox" class="lightbox" aria-hidden="true">
+  <button class="lb-btn lb-close" aria-label="Закрыть">×</button>
+  <button class="lb-btn lb-prev" aria-label="Предыдущее фото"></button>
+  <img class="lb-img" alt="">
+  <button class="lb-btn lb-next" aria-label="Следующее фото"></button>
+  <div class="lb-counter"></div>
+</div>
+
 <div id="nav">
   <button id="prev">← Назад</button>
   <span id="counter"></span>
@@ -370,6 +435,7 @@
 </div>
 
 <script>
+  // ---------- слайды ----------
   const slides = [...document.querySelectorAll('.slide')];
   const counter = document.getElementById('counter');
   const bar = document.getElementById('progress');
@@ -383,12 +449,93 @@
   }
   document.getElementById('prev').onclick = () => show(i - 1);
   document.getElementById('next').onclick = () => show(i + 1);
+
+  // ---------- lightbox ----------
+  const lb = document.getElementById('lightbox');
+  const lbImg = lb.querySelector('.lb-img');
+  const lbCounter = lb.querySelector('.lb-counter');
+  const lbPrev = lb.querySelector('.lb-prev');
+  const lbNext = lb.querySelector('.lb-next');
+  let lbPhotos = [];
+  let lbIndex = 0;
+
+  function lbRender() {
+    if (!lbPhotos.length) return;
+    lbImg.src = lbPhotos[lbIndex].src;
+    lbImg.alt = lbPhotos[lbIndex].alt || '';
+    lbCounter.textContent = `${lbIndex + 1} / ${lbPhotos.length}`;
+    const multi = lbPhotos.length > 1;
+    lbPrev.style.display = multi ? '' : 'none';
+    lbNext.style.display = multi ? '' : 'none';
+  }
+
+  function lbOpen(photoList, idx) {
+    lbPhotos = photoList;
+    lbIndex = idx;
+    lbRender();
+    lb.classList.add('open');
+    lb.setAttribute('aria-hidden', 'false');
+  }
+
+  function lbClose() {
+    lb.classList.remove('open');
+    lb.setAttribute('aria-hidden', 'true');
+  }
+
+  function lbNav(delta) {
+    if (lbPhotos.length < 2) return;
+    lbIndex = (lbIndex + delta + lbPhotos.length) % lbPhotos.length;
+    lbRender();
+  }
+
+  // клики по фото на любом слайде — открываем lightbox
+  document.querySelectorAll('.slide img').forEach(img => {
+    img.addEventListener('click', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      const slide = img.closest('.slide');
+      // фото именно этого слайда, в порядке DOM
+      const slideImgs = [...slide.querySelectorAll('img')];
+      const idx = slideImgs.indexOf(img);
+      lbOpen(slideImgs, idx >= 0 ? idx : 0);
+    });
+  });
+
+  lb.querySelector('.lb-close').onclick = e => {
+    e.stopPropagation(); lbClose();
+  };
+  lbPrev.onclick = e => { e.stopPropagation(); lbNav(-1); };
+  lbNext.onclick = e => { e.stopPropagation(); lbNav(1); };
+
+  // клик по фону (не по картинке и не по кнопке) — закрыть
+  lb.addEventListener('click', e => {
+    if (e.target === lb) lbClose();
+  });
+
+  // ---------- клавиатура ----------
   document.addEventListener('keydown', e => {
-    if (['ArrowRight', ' ', 'PageDown'].includes(e.key)) { e.preventDefault(); show(i + 1); }
-    if (['ArrowLeft', 'PageUp'].includes(e.key)) { e.preventDefault(); show(i - 1); }
+    // если открыт lightbox — перехватываем стрелки/Esc
+    if (lb.classList.contains('open')) {
+      if (e.key === 'Escape') { e.preventDefault(); lbClose(); return; }
+      if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') {
+        e.preventDefault(); lbNav(1); return;
+      }
+      if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
+        e.preventDefault(); lbNav(-1); return;
+      }
+      return; // остальное игнорируем, пока открыт lightbox
+    }
+    // обычная навигация по слайдам
+    if (['ArrowRight', ' ', 'PageDown'].includes(e.key)) {
+      e.preventDefault(); show(i + 1);
+    }
+    if (['ArrowLeft', 'PageUp'].includes(e.key)) {
+      e.preventDefault(); show(i - 1);
+    }
     if (e.key === 'Home') show(0);
     if (e.key === 'End') show(slides.length - 1);
   });
+
   show(0);
 </script>
 </body>
