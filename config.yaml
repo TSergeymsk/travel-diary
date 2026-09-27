@@ -1,5 +1,6 @@
 # ============================================================
 #  Travel Diary — конфигурация
+#  Зрение — локально (Ollama), тексты — в облако (Groq/OpenRouter).
 # ============================================================
 
 runtime:
@@ -23,6 +24,7 @@ fallback:
 
 roles:
 
+  # ============ Vision: локально ============
   vision:
     fallback_role: reduce
     empty_result: "Кадры этого места"
@@ -50,6 +52,7 @@ roles:
         max_tokens: 300
         num_ctx: 2048
 
+  # ============ Text: облако ============
   text:
     fallback_role: reduce
     empty_result: ""
@@ -61,6 +64,7 @@ roles:
         base_url: https://api.groq.com/openai/v1
         temperature: 0.85
         max_tokens: 1200
+        reasoning_effort: low
         rate_limit:
           rpm: 25
           tpm: 7000
@@ -73,6 +77,7 @@ roles:
         base_url: https://api.groq.com/openai/v1
         temperature: 0.85
         max_tokens: 1200
+        reasoning_effort: low
         rate_limit:
           rpm: 25
           tpm: 7000
@@ -85,6 +90,7 @@ roles:
         base_url: https://api.groq.com/openai/v1
         temperature: 0.85
         max_tokens: 1200
+        reasoning_effort: low
         rate_limit:
           rpm: 25
           tpm: 7000
@@ -102,6 +108,7 @@ roles:
           tpm: 0
           min_interval_s: 1.0
 
+  # ============ Proofread: облако, лёгкая модель ============
   proofread:
     empty_result: ""
     chain:
@@ -112,6 +119,7 @@ roles:
         base_url: https://api.groq.com/openai/v1
         temperature: 0.15
         max_tokens: 1500
+        reasoning_effort: low
         rate_limit:
           rpm: 25
           tpm: 7000
@@ -124,6 +132,7 @@ roles:
         base_url: https://api.groq.com/openai/v1
         temperature: 0.15
         max_tokens: 1500
+        reasoning_effort: low
         rate_limit:
           rpm: 25
           tpm: 7000
@@ -141,6 +150,7 @@ roles:
           tpm: 0
           min_interval_s: 1.0
 
+  # ============ Reduce: локальный ============
   reduce:
     empty_result: ""
     chain:
@@ -157,32 +167,31 @@ roles:
         max_tokens: 250
         num_ctx: 4096
 
+# ---------- Параметры обработки ----------
 processing:
-  # ---- Изображения ----
   vision_max_side: 512
   export_max_side: 1600
   cluster_radius_m: 400
   max_images_per_cluster: 2
   use_reverse_geocode: true
 
-  # ---- Метаданные ----
-  use_file_mtime_fallback: true        # если EXIF-дата отсутствует — брать mtime
-  photo_tz_offset_hours: 3             # fallback, если нет OffsetTimeOriginal в EXIF
+  use_file_mtime_fallback: true
+  photo_tz_offset_hours: 3
 
-  # ---- Дедупликация и диверсификация ----
   max_photos_per_day: 6
-  max_photos_per_location: 4           # сколько фото на слайде одной локации
+  max_photos_per_location: 4
   dedup_time_window_s: 5
   dedup_hash_threshold: 10
   max_photos_per_cluster: 2
 
-  # ---- Значимость локаций ----
-  significant_min_photos: 3            # ≥ N фото → кластер становится слайдом
-  significant_require_wiki: false      # если true — только кластеры со статьёй
-  day_intro_min_locations: 2           # слайд-вступление дня при ≥ N значимых
-  generate_route_overview: true        # делать общий слайд о маршруте
+  significant_min_photos: 3
+  significant_require_wiki: false
+  day_intro_min_locations: 2
+  generate_route_overview: true
 
-  # ---- Интерполяция GPS ----
+  transit_min_clusters: 2
+  transit_min_photos: 3
+
   gps_interpolation_from_gpx: true
   gps_interpolation_max_gap_min: 30
 

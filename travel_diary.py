@@ -60,7 +60,6 @@ def dms_to_deg(values, ref) -> float:
 
 
 def parse_tz_offset(s: str) -> timezone | None:
-    """'+03:00' или '-05:30' → timezone."""
     if not s:
         return None
     s = s.strip()
@@ -92,8 +91,8 @@ class Photo:
     lat: float | None = None
     lon: float | None = None
     camera: str | None = None
-    gps_source: str | None = None       # 'exif' | 'gpx' | None
-    dt_source: str | None = None        # 'exif' | 'mtime'
+    gps_source: str | None = None
+    dt_source: str | None = None
     tz: timezone | None = None
     _phash: int | None = field(default=None, repr=False)
 
@@ -467,7 +466,11 @@ def export_photo(src: Path, dst: Path, max_side: int) -> None:
 
 def _phash_value(img: Image.Image, size: int = 8) -> int:
     g = img.convert("L").resize((size, size), _LANCZOS)
-    pixels = list(g.getdata())
+    # Pillow 12+ ругается на getdata(); get_flattened_data — его замена.
+    if hasattr(g, "get_flattened_data"):
+        pixels = list(g.get_flattened_data())
+    else:
+        pixels = list(g.getdata())
     avg = sum(pixels) / len(pixels)
     bits = 0
     for p in pixels:
@@ -728,7 +731,7 @@ def proofread_text(proofread_runner, original: str) -> str:
 
 
 # ============================================================
-#  Постобработка: дедуп вики и подряд идущих мест
+#  Постобработка
 # ============================================================
 
 def dedup_wiki_texts(days: list[Day]) -> None:
@@ -784,19 +787,13 @@ def classify_day_clusters(
 # ============================================================
 
 def pick_cover(days: list[Day], dedup_kwargs: dict) -> Photo | None:
-    """
-    Обложка из середины поездки. Приоритет — дневные кадры (10:00–18:00),
-    чтобы не брать ночные из аэропорта или из окна самолёта в темноте.
-    """
+    """Обложка из середины поездки, предпочтительно дневные кадры."""
     if not days:
         return None
-
-    # пробуем средний день; если пустой — соседние по расстоянию
     mid = len(days) // 2
     order = sorted(range(len(days)), key=lambda i: abs(i - mid))
     for idx in order:
         day = days[idx]
-        # сначала пробуем дневные фото
         day_photos = [p for p in day.photos
                       if p.dt and 10 <= p.dt.hour <= 18]
         pool = day_photos or day.photos
@@ -885,7 +882,6 @@ def main():
     day_intro_min_locations = proc.get("day_intro_min_locations", 2)
     generate_route_overview = proc.get("generate_route_overview", True)
 
-    # ---- параметры transit-слайда ----
     transit_min_clusters = proc.get("transit_min_clusters", 2)
     transit_min_photos = proc.get("transit_min_photos", 3)
 
@@ -967,7 +963,6 @@ def main():
                     tag = c.place or f"{c.lat:.3f},{c.lon:.3f}"
                     print(f"      · {tag}: {c.wiki[:60]}…")
 
-    # Дедуп вики-текстов между кластерами
     dedup_wiki_texts(days)
 
     # ---------- 5. ФАЗА A: VISION ----------
@@ -1082,7 +1077,6 @@ def main():
 
     slides: list[dict] = []
 
-    # ---- обложка из середины ----
     dedup_kwargs = {
         "time_window_s": dedup_time_window_s,
         "hash_threshold": dedup_hash_threshold,
@@ -1100,10 +1094,8 @@ def main():
         "meta": f"{len(days)} дней · {total_km:.0f} км · {len(photos)} кадров",
     })
 
-    # ---- пролог ----
     slides.append({"kind": "intro", "title": "Пролог", "text": intro})
 
-    # ---- обзор маршрута ----
     if route_overview:
         stops: list[dict] = []
         for i, d in enumerate(days, 1):
@@ -1124,7 +1116,6 @@ def main():
             "stops": stops,
         })
 
-    # ---- дни ----
     for i, day in enumerate(days, 1):
         if single_slide_days:
             day_photos = dedupe_and_diversify(
@@ -1151,7 +1142,6 @@ def main():
             })
             continue
 
-        # day-intro
         if day.day_intro and len(day.major_clusters) >= day_intro_min_locations:
             intro_photos = dedupe_and_diversify(
                 day.photos, max_n=max_photos_per_day,
@@ -1170,7 +1160,6 @@ def main():
                 "photos": intro_photos_html,
             })
 
-        # слайды локаций
         for c in day.major_clusters:
             picked_photos = dedupe_and_diversify(
                 c.photos, max_n=max_photos_per_location,
@@ -1193,7 +1182,6 @@ def main():
                 "photos": photos_html,
             })
 
-        # transit для minor — только если содержательный
         minor_with_photos = [c for c in day.minor_clusters if c.photos]
         total_minor_photos = sum(len(c.photos) for c in minor_with_photos)
         if (len(minor_with_photos) >= transit_min_clusters

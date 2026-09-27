@@ -10,6 +10,10 @@
 Облачные бэкенды (Groq, OpenRouter) оборачиваются в:
   • RateLimiter — не даём выйти за RPM/TPM;
   • retry с экспоненциальным backoff — 429 и 5xx переживаем без падения.
+
+reasoning_effort: low | medium | high — для reasoning-моделей
+(например gpt-oss-120b/20b на Groq). Без него модель тратит весь
+бюджет max_tokens на внутренние «размышления», а content приходит пустым.
 """
 from __future__ import annotations
 
@@ -35,9 +39,9 @@ log = logging.getLogger("providers")
 @dataclass
 class RateLimitConfig:
     """Sliding-window лимиты для облачных API (RPM/TPM за 60 сек)."""
-    rpm: int = 0                # 0 = не ограничивать
-    tpm: int = 0                # 0 = не ограничивать
-    min_interval_s: float = 0.0 # минимальный интервал между запросами
+    rpm: int = 0
+    tpm: int = 0
+    min_interval_s: float = 0.0
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "RateLimitConfig":
@@ -81,11 +85,11 @@ class BackendConfig:
     keep_alive: str | None = None
     label: str | None = None
     num_ctx: int | None = None
+    reasoning_effort: str | None = None       # low | medium | high
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
 
     @classmethod
     def from_dict(cls, d: dict) -> "BackendConfig":
-        # rate_limit — единственный вложенный объект, обработаем вручную
         rl = RateLimitConfig.from_dict(d.get("rate_limit"))
         kwargs = {k: d[k] for k in cls.__dataclass_fields__
                   if k in d and k != "rate_limit"}
@@ -104,8 +108,6 @@ class RateLimiter:
     """
     Sliding-window: не более rpm запросов и tpm токенов за последние 60 сек.
     Плюс минимальный интервал между запросами.
-
-    Используется как блокирующий acquire() перед каждым запросом.
     """
 
     def __init__(self, rpm: int = 0, tpm: int = 0, min_interval_s: float = 0.0):
@@ -117,7 +119,6 @@ class RateLimiter:
         self._lock = threading.Lock()
 
     def acquire(self, estimated_tokens: int = 0) -> None:
-        """Блокирует поток до момента, когда можно сделать запрос."""
         with self._lock:
             while True:
                 now = time.monotonic()
@@ -141,7 +142,6 @@ class RateLimiter:
 
                 if wait <= 0:
                     break
-                # cap, чтобы не спрятаться на полчаса из-за одного кривого состояния
                 time.sleep(min(wait, 30.0))
 
             now = time.monotonic()
@@ -149,7 +149,6 @@ class RateLimiter:
             self._last_call = now
 
     def pause(self, seconds: float) -> None:
-        """Внешний backoff — например, из заголовка Retry-After."""
         if seconds > 0:
             time.sleep(seconds)
             with self._lock:
@@ -258,7 +257,8 @@ class _OpenAIBackend:
         headers = getattr(resp, "headers", None)
         if not headers:
             return None
-        for key in ("retry-after", "x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"):
+        for key in ("retry-after", "x-ratelimit-reset-requests",
+                    "x-ratelimit-reset-tokens"):
             val = headers.get(key)
             if not val:
                 continue
@@ -305,7 +305,6 @@ class _OpenAIBackend:
                     time.sleep(wait)
                     continue
 
-                # 4xx (кроме 429), сетевые ошибки, ошибки парсинга — не retry
                 raise
 
         assert last_exc is not None
@@ -318,15 +317,18 @@ class _OpenAIBackend:
         estimated = estimate_tokens(prompt_text, self.cfg.max_tokens)
 
         def _do():
-            return self.client.chat.completions.create(
-                model=self.cfg.model,
-                messages=[
+            kwargs: dict = {
+                "model": self.cfg.model,
+                "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                temperature=self.cfg.temperature,
-                max_tokens=self.cfg.max_tokens,
-            )
+                "temperature": self.cfg.temperature,
+                "max_tokens": self.cfg.max_tokens,
+            }
+            if self.cfg.reasoning_effort:
+                kwargs["reasoning_effort"] = self.cfg.reasoning_effort
+            return self.client.chat.completions.create(**kwargs)
 
         r = self._call_with_retry(_do, estimated)
         return (r.choices[0].message.content or "").strip()
@@ -339,16 +341,18 @@ class _OpenAIBackend:
                 "type": "image_url",
                 "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
             })
-        # картинки в base64 занимают много токенов, оценим грубо
         estimated = estimate_tokens(prompt, self.cfg.max_tokens) + len(images) * 300
 
         def _do():
-            return self.client.chat.completions.create(
-                model=self.cfg.model,
-                messages=[{"role": "user", "content": content}],
-                temperature=self.cfg.temperature,
-                max_tokens=self.cfg.max_tokens,
-            )
+            kwargs: dict = {
+                "model": self.cfg.model,
+                "messages": [{"role": "user", "content": content}],
+                "temperature": self.cfg.temperature,
+                "max_tokens": self.cfg.max_tokens,
+            }
+            if self.cfg.reasoning_effort:
+                kwargs["reasoning_effort"] = self.cfg.reasoning_effort
+            return self.client.chat.completions.create(**kwargs)
 
         r = self._call_with_retry(_do, estimated)
         return (r.choices[0].message.content or "").strip()
@@ -473,6 +477,12 @@ class RoleRunner:
                 backend = self.registry.get(cfg)
                 result = call(backend)
                 dt = time.monotonic() - t0
+                # пустой результат считаем провалом — частая беда reasoning-моделей
+                if result is None or (isinstance(result, str) and not result.strip()):
+                    self.history.append(Attempt(cfg.name, False,
+                                                "empty result", dt))
+                    log.warning(f"[{self.role_name}] {cfg.name} empty result ({dt:.1f}s)")
+                    continue
                 self.history.append(Attempt(cfg.name, True, duration_s=dt))
                 log.info(f"[{self.role_name}] {cfg.name} ok ({dt:.1f}s)")
                 return result
@@ -547,7 +557,6 @@ class Registry:
             or "http://localhost:11434"
         )
         self.ollama = OllamaManager(self.ollama_host)
-
         self.retry_cfg = RetryConfig.from_dict(self.runtime.get("retry"))
 
     @staticmethod
