@@ -2,9 +2,13 @@
 Поиск краткой информации о месте через Википедию.
 Без API-ключей, через публичный REST API.
 
-Основной путь — геопоиск по координатам (list=geosearch). Это позволяет
-отличить, например, район Чаоян в Пекине от города Чаоян в Ляонине.
-Текстовый поиск остаётся как резерв, когда координат нет.
+Стратегия:
+  1. Геопоиск по координатам (list=geosearch).
+     Если ближайшая статья дальше max_dist_m — считаем её «не про это место»
+     и переходим к текстовому поиску. Это спасает от того, что рядом с
+     Химками статью про безымянную деревню в 137 человек геопоиск находит
+     раньше, чем собственно «Химки».
+  2. Текстовый поиск по названию (list=search + REST summary).
 """
 from __future__ import annotations
 
@@ -14,7 +18,6 @@ from urllib.parse import quote
 _cache: dict = {}
 
 # Wikipedia требует контактный URL или email в User-Agent.
-# Замените на свой реальный контакт — это их политика.
 _HEADERS = {
     "User-Agent": "TravelDiary/1.0 (https://example.com/travel-diary; mailto:you@example.com)",
     "Accept": "application/json",
@@ -52,10 +55,7 @@ def _extract_for_titles(
         },
     )
     pages = (data or {}).get("query", {}).get("pages", {})
-    # сохраняем порядок titles: сначала тот, что первым в списке
-    order = {}
-    for i, t in enumerate(titles):
-        order[t.lower()] = i
+    order = {t.lower(): i for i, t in enumerate(titles)}
     best: tuple[int, str] = (10_000, "")
     for page in pages.values():
         if page.get("missing"):
@@ -67,9 +67,7 @@ def _extract_for_titles(
         rank = order.get(title, 1000)
         if rank < best[0]:
             best = (rank, ext)
-    if best[1]:
-        return best[1][:max_chars]
-    return None
+    return best[1][:max_chars] if best[1] else None
 
 
 def _geosearch(
@@ -93,7 +91,6 @@ def _geosearch(
 
 
 def _text_search(place: str, lang: str, timeout: float) -> list[str]:
-    """Текстовый поиск по имени, возвращает список заголовков."""
     data = _fetch(
         f"https://{lang}.wikipedia.org/w/api.php",
         timeout,
@@ -113,7 +110,7 @@ def _rank_by_toponym(
 ) -> list[str]:
     """
     Сортирует геохиты: сначала те, что по названию совпадают с топонимом,
-    затем по расстоянию. Возвращает упорядоченный список заголовков.
+    затем по расстоянию.
     """
     toponym = ""
     if place:
@@ -123,13 +120,11 @@ def _rank_by_toponym(
         title, dist = item
         t = title.lower()
         if toponym:
-            # «район Чаоян» ~ «Чаоян» ~ «Район Чаоян»
             match = toponym in t or t in toponym
             prefix_bonus = 0 if t.startswith(toponym) else 1
         else:
             match = False
             prefix_bonus = 0
-        # 0 — совпало, 1 — нет; внутри группы — по расстоянию
         return (0 if match else 1, prefix_bonus, dist)
 
     return [title for title, _ in sorted(hits, key=key)]
@@ -143,29 +138,33 @@ def wiki_summary(
     max_chars: int = 600,
     timeout: float = 8.0,
     radius_m: int = 5000,
+    max_dist_m: int = 2000,
 ) -> str | None:
     """
     Ищет краткую справку о месте.
-    Приоритет:
-      1. Геопоиск по координатам (если lat/lon заданы) — самый точный.
-      2. Текстовый поиск по названию.
+
+    max_dist_m — максимальное расстояние от точки до статьи геопоиска,
+    при котором считаем, что статья — «про это место». Если ближайшая
+    статья дальше, уходим в текстовый поиск по имени.
     """
     if lat is None and lon is None and not place:
         return None
 
     ck = (lang, place or "",
           round(lat, 3) if lat is not None else None,
-          round(lon, 3) if lon is not None else None)
+          round(lon, 3) if lon is not None else None,
+          max_dist_m)
     if ck in _cache:
         return _cache[ck]
 
     result: str | None = None
 
-    # ---- 1. Геопоиск ----
+    # ---- 1. Геопоиск (только если точка достаточно близко) ----
     if lat is not None and lon is not None:
         hits = _geosearch(lat, lon, lang, timeout, radius_m)
-        if hits:
-            titles = _rank_by_toponym(hits, place)
+        close_hits = [(t, d) for t, d in hits if d <= max_dist_m]
+        if close_hits:
+            titles = _rank_by_toponym(close_hits, place)
             result = _extract_for_titles(titles, lang, timeout, max_chars)
             if result:
                 _cache[ck] = result
@@ -173,7 +172,6 @@ def wiki_summary(
 
     # ---- 2. Текстовый поиск ----
     if place:
-        # Сначала пробуем прямой заголовок через REST summary
         data = _fetch(
             f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/"
             f"{quote(place)}",

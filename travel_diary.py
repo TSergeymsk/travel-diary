@@ -6,13 +6,16 @@ travel_diary.py — генерирует HTML-дневник путешеств�
   1. Метаданные   — обход всех файлов, EXIF + mtime-fallback + tz-offset
   2. GPX          — расстояния по дням + интерполяция GPS
   3. Кластеры     — группировка фото по дням и локациям
-  4. Геокодинг    — Nominatim + Википедия (геопоиск по координатам)
+  4. Геокодинг    — Nominatim + Википедия (геопоиск с fallback на текст)
   5. Фаза VISION  — описания кадров для каждого кластера
   6. Классификация — major/minor локации
   7. Фаза TEXT    — заголовки, рассказы по локациям, вступления дней,
                     обзор маршрута, финал
   8. Фаза PROOFREAD — вычитка
-  9. Экспорт фото + HTML (с дедупликацией и диверсификацией кадров)
+  9. Экспорт фото + HTML:
+       • фото переименовываются в slide_NN_MM.jpg по порядку слайдов
+       • из фото вырезаются EXIF-метаданные
+       • размер уменьшается до export_max_side
 """
 from __future__ import annotations
 
@@ -72,7 +75,6 @@ def parse_tz_offset(s: str) -> timezone | None:
 
 
 def dedup_consecutive(items: list[str]) -> list[str]:
-    """Убирает подряд идущие одинаковые строки."""
     out: list[str] = []
     for x in items:
         if not out or out[-1] != x:
@@ -213,7 +215,6 @@ def collect_metadata(
     use_mtime_fallback: bool,
     fallback_tz: timezone,
 ) -> tuple[list[Photo], dict]:
-    """Обходит всю папку, читает метаданные. Все даты — aware."""
     all_files: list[Path] = []
     for path in sorted(root.rglob("*")):
         if path.is_file() and path.suffix.lower() in EXTS:
@@ -456,17 +457,33 @@ def image_bytes_for_vision(path: Path, max_side: int) -> bytes:
     return buf.getvalue()
 
 
-def export_photo(src: Path, dst: Path, max_side: int) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
+def export_photo_numbered(
+    src: Path,
+    photos_dir: Path,
+    slide_num: int,
+    pic_num: int,
+    max_side: int,
+) -> str:
+    """
+    Экспортирует фото как slide_NN_MM.jpg:
+      • переименование с нумерацией по слайду,
+      • вырезание всех EXIF-метаданных,
+      • уменьшение до max_side по длинной стороне.
+    Возвращает относительный URL вида photos/slide_04_02.jpg.
+    """
+    name = f"slide_{slide_num:02d}_{pic_num:02d}.jpg"
+    dst = photos_dir / name
     img = Image.open(src)
+    # exif_transpose возвращает НОВЫЙ объект без EXIF.
     img = ImageOps.exif_transpose(img).convert("RGB")
     img.thumbnail((max_side, max_side))
+    # save() без параметра exif= гарантирует отсутствие метаданных.
     img.save(dst, format="JPEG", quality=85, optimize=True)
+    return f"photos/{name}"
 
 
 def _phash_value(img: Image.Image, size: int = 8) -> int:
     g = img.convert("L").resize((size, size), _LANCZOS)
-    # Pillow 12+ ругается на getdata(); get_flattened_data — его замена.
     if hasattr(g, "get_flattened_data"):
         pixels = list(g.get_flattened_data())
     else:
@@ -488,8 +505,15 @@ def dedupe_and_diversify(
     time_window_s: int = 5,
     hash_threshold: int = 10,
     max_per_cluster: int = 2,
+    exclude_paths: set[Path] | None = None,
 ) -> list[Photo]:
-    """Возвращает до max_n разных фото по времени/хешу/кластеру."""
+    """
+    Возвращает до max_n разных фото по времени/хешу/кластеру.
+    exclude_paths — фото, которые нужно исключить (например, уже
+    использованные на слайдах локаций).
+    """
+    if exclude_paths:
+        photos = [p for p in photos if p.path not in exclude_paths]
     if not photos:
         return []
 
@@ -585,7 +609,10 @@ DAY_INTRO_SYSTEM = (
 LOCATION_NARRATIVE_SYSTEM = (
     "Ты — писатель-путешественник. Пишешь небольшой очерк (120–220 слов) об одной "
     "точке маршрута — от первого лица, с деталями, атмосферой. Опирайся на "
-    "визуальные заметки и справку. Не перечисляй факты списком, вплетай их. "
+    "визуальные заметки и справку. Не перечисляй факты списком, вплетай их.\n"
+    "Если не уверен, из какого транспорта снят кадр, пиши нейтрально — «из окна». "
+    "Не выдумывай поезд, самолёт, машину или автобус, если это не подтверждено "
+    "явными признаками. Не упоминай снег или зиму, если их нет на кадре.\n"
     "Без заголовков. Пиши ТОЛЬКО на русском языке, без иноязычных вставок."
 )
 
@@ -787,7 +814,6 @@ def classify_day_clusters(
 # ============================================================
 
 def pick_cover(days: list[Day], dedup_kwargs: dict) -> Photo | None:
-    """Обложка из середины поездки, предпочтительно дневные кадры."""
     if not days:
         return None
     mid = len(days) // 2
@@ -958,6 +984,8 @@ def main():
                     lang=search_cfg.get("language", "ru"),
                     max_chars=search_cfg.get("max_chars", 600),
                     timeout=search_cfg.get("timeout", 8),
+                    radius_m=search_cfg.get("radius_m", 5000),
+                    max_dist_m=search_cfg.get("max_dist_m", 2000),
                 )
                 if c.wiki:
                     tag = c.place or f"{c.lat:.3f},{c.lon:.3f}"
@@ -1059,21 +1087,11 @@ def main():
     finally:
         registry.end_phase(phase_b)
 
-    # ---------- 7. Экспорт фото и сборка HTML ----------
-    print("[6/7] Экспорт фотографий")
-    out = args.out
-    photos_dir = out / "photos"
-    photos_dir.mkdir(parents=True, exist_ok=True)
-
-    def export(p: Photo) -> str:
-        dst = photos_dir / p.path.name
-        if not dst.exists():
-            try:
-                export_photo(p.path, dst, export_max_side)
-            except Exception as e:
-                print(f"      ! {p.path.name}: {e}", file=sys.stderr)
-                return ""
-        return f"photos/{dst.name}"
+    # ---------- 7. Сборка структуры слайдов ----------
+    # На этом этапе слайды содержат объекты Photo в _photo_objs / _cover_photo.
+    # Реальный экспорт и переименование — на следующем шаге, когда известен
+    # номер слайда.
+    print("[6/7] Собираю слайды")
 
     slides: list[dict] = []
 
@@ -1083,15 +1101,14 @@ def main():
         "max_per_cluster": 1,
     }
     cover_photo_obj = pick_cover(days, dedup_kwargs)
-    cover_photo = export(cover_photo_obj) if cover_photo_obj else ""
 
     slides.append({
         "kind": "cover",
         "title": cfg.get("output", {}).get("title", "Моё путешествие"),
         "subtitle": (f"{days[0].date.strftime('%d.%m.%Y')} — "
                      f"{days[-1].date.strftime('%d.%m.%Y')}"),
-        "photo": cover_photo,
         "meta": f"{len(days)} дней · {total_km:.0f} км · {len(photos)} кадров",
+        "_cover_photo": cover_photo_obj,
     })
 
     slides.append({"kind": "intro", "title": "Пролог", "text": intro})
@@ -1124,7 +1141,6 @@ def main():
                 hash_threshold=dedup_hash_threshold,
                 max_per_cluster=max_photos_per_cluster,
             )
-            photos_html = [x for x in (export(p) for p in day_photos) if x]
             slides.append({
                 "kind": "day",
                 "index": i,
@@ -1138,36 +1154,54 @@ def main():
                      "narrative": c.narrative}
                     for c in day.clusters
                 ],
-                "photos": photos_html,
+                "_photo_objs": day_photos,
             })
             continue
 
-        if day.day_intro and len(day.major_clusters) >= day_intro_min_locations:
-            intro_photos = dedupe_and_diversify(
-                day.photos, max_n=max_photos_per_day,
-                time_window_s=dedup_time_window_s,
-                hash_threshold=dedup_hash_threshold,
-                max_per_cluster=1,
-            )
-            intro_photos_html = [x for x in (export(p) for p in intro_photos) if x]
-            slides.append({
-                "kind": "day-intro",
-                "index": i,
-                "date": day.date.strftime("%d.%m.%Y"),
-                "title": day.title,
-                "meta": f"{day.distance_km:.1f} км" if day.distance_km else "",
-                "narrative": day.day_intro,
-                "photos": intro_photos_html,
-            })
-
+        # 1) ПРЕДВАРИТЕЛЬНО выбираем фото для каждого major-кластера,
+        #    чтобы day-intro не дублировал их.
+        location_picks: dict[int, list[Photo]] = {}
+        used_paths: set[Path] = set()
         for c in day.major_clusters:
-            picked_photos = dedupe_and_diversify(
+            picked = dedupe_and_diversify(
                 c.photos, max_n=max_photos_per_location,
                 time_window_s=dedup_time_window_s,
                 hash_threshold=dedup_hash_threshold,
                 max_per_cluster=1,
             )
-            photos_html = [x for x in (export(p) for p in picked_photos) if x]
+            location_picks[id(c)] = picked
+            used_paths.update(p.path for p in picked)
+
+        # 2) day-intro: исключаем фото, уже занятые локациями
+        if day.day_intro and len(day.major_clusters) >= day_intro_min_locations:
+            intro_pool = dedupe_and_diversify(
+                day.photos, max_n=max_photos_per_day,
+                time_window_s=dedup_time_window_s,
+                hash_threshold=dedup_hash_threshold,
+                max_per_cluster=1,
+                exclude_paths=used_paths,
+            )
+            # если всё уже разобрано локациями — падаем на обычный пул
+            if not intro_pool:
+                intro_pool = dedupe_and_diversify(
+                    day.photos, max_n=max_photos_per_day,
+                    time_window_s=dedup_time_window_s,
+                    hash_threshold=dedup_hash_threshold,
+                    max_per_cluster=1,
+                )
+            if intro_pool:
+                slides.append({
+                    "kind": "day-intro",
+                    "index": i,
+                    "date": day.date.strftime("%d.%m.%Y"),
+                    "title": day.title,
+                    "meta": f"{day.distance_km:.1f} км" if day.distance_km else "",
+                    "narrative": day.day_intro,
+                    "_photo_objs": intro_pool,
+                })
+
+        # 3) слайды локаций
+        for c in day.major_clusters:
             slides.append({
                 "kind": "location",
                 "index": i,
@@ -1179,9 +1213,10 @@ def main():
                 "narrative": c.narrative,
                 "description": c.description,
                 "wiki": c.wiki,
-                "photos": photos_html,
+                "_photo_objs": location_picks[id(c)],
             })
 
+        # 4) transit для minor — фото, не использованные локациями
         minor_with_photos = [c for c in day.minor_clusters if c.photos]
         total_minor_photos = sum(len(c.photos) for c in minor_with_photos)
         if (len(minor_with_photos) >= transit_min_clusters
@@ -1194,23 +1229,71 @@ def main():
                 time_window_s=dedup_time_window_s,
                 hash_threshold=dedup_hash_threshold,
                 max_per_cluster=1,
+                exclude_paths=used_paths,
             )
-            photos_html = [x for x in (export(p) for p in picked) if x]
-            slides.append({
-                "kind": "transit",
-                "index": i,
-                "date": day.date.strftime("%d.%m.%Y"),
-                "clusters": [
-                    {"place": c.place or "Без локации",
-                     "description": c.description}
-                    for c in minor_with_photos
-                ],
-                "photos": photos_html,
-            })
+            if not picked:
+                picked = dedupe_and_diversify(
+                    transit_pool, max_n=max_photos_per_day,
+                    time_window_s=dedup_time_window_s,
+                    hash_threshold=dedup_hash_threshold,
+                    max_per_cluster=1,
+                )
+            if picked:
+                slides.append({
+                    "kind": "transit",
+                    "index": i,
+                    "date": day.date.strftime("%d.%m.%Y"),
+                    "clusters": [
+                        {"place": c.place or "Без локации",
+                         "description": c.description}
+                        for c in minor_with_photos
+                    ],
+                    "_photo_objs": picked,
+                })
 
     slides.append({"kind": "finale", "title": "Послесловие", "text": finale})
 
-    print("[7/7] Сборка HTML")
+    # ---------- 8. Экспорт фото с нумерацией по слайдам ----------
+    print("[7/7] Экспорт фотографий и сборка HTML")
+    out = args.out
+    photos_dir = out / "photos"
+    photos_dir.mkdir(parents=True, exist_ok=True)
+
+    # Чистим старые slide_*.jpg, чтобы не копились хвосты от прошлых прогонов.
+    for old in photos_dir.glob("slide_*.jpg"):
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+    for s_idx, s in enumerate(slides, 1):
+        # обложка
+        cover_obj = s.pop("_cover_photo", None)
+        if s.get("kind") == "cover":
+            if cover_obj is not None:
+                try:
+                    s["photo"] = export_photo_numbered(
+                        cover_obj.path, photos_dir, s_idx, 1, export_max_side)
+                except Exception as e:
+                    print(f"      ! {cover_obj.path.name}: {e}", file=sys.stderr)
+                    s["photo"] = ""
+            else:
+                s["photo"] = ""
+
+        # обычные слайды с фото
+        photo_objs = s.pop("_photo_objs", None)
+        if photo_objs is not None:
+            urls: list[str] = []
+            for k, p in enumerate(photo_objs, 1):
+                if p is None:
+                    continue
+                try:
+                    urls.append(export_photo_numbered(
+                        p.path, photos_dir, s_idx, k, export_max_side))
+                except Exception as e:
+                    print(f"      ! {p.path.name}: {e}", file=sys.stderr)
+            s["photos"] = urls
+
     templates_dir = Path(__file__).parent / "templates"
     env = Environment(loader=FileSystemLoader(str(templates_dir)), autoescape=True)
     tpl = env.get_template("slides.html.j2")

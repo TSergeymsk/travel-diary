@@ -176,7 +176,7 @@ processing:
   use_reverse_geocode: true
 
   use_file_mtime_fallback: true
-  photo_tz_offset_hours: 3
+  photo_tz_offset_hours: 8
 
   max_photos_per_day: 6
   max_photos_per_location: 4
@@ -195,12 +195,16 @@ processing:
   gps_interpolation_from_gpx: true
   gps_interpolation_max_gap_min: 30
 
+# ---------- Обогащение из интернета ----------
 search:
   enabled: true
   language: ru
   max_chars: 600
   timeout: 8
+  radius_m: 5000          # радиус геопоиска
+  max_dist_m: 2000        # ближе этого — считаем, что статья «про это место»
 
+# ---------- Вывод ----------
 output:
   title: "Моё путешествие"
   theme: light
