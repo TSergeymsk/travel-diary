@@ -185,7 +185,6 @@ class OllamaManager:
             self.unload(m)
 
     def ping(self) -> bool:
-        """Проверка доступности сервера."""
         try:
             r = httpx.get(f"{self.host}/api/tags", timeout=5)
             return r.status_code == 200
@@ -218,7 +217,7 @@ class Attempt:
 
 class RoleRunner:
     """
-    Одна роль (vision/text/reduce). Хранит цепочку бэкендов,
+    Одна роль (vision/text/proofread/reduce). Хранит цепочку бэкендов,
     на ошибку пробует следующий. Если вся цепочка упала —
     обращается к reduce-роли (имя из fallback_role), затем
     к hard-truncate, затем к empty_result.
@@ -283,7 +282,6 @@ class RoleRunner:
     # ---------- аварийное сжатие ----------
 
     def _reduce(self, source: str) -> str:
-        """Сжать текст через reduce-роль. При провале — hard-truncate."""
         source = (source or "").strip()
         if not source:
             return self.empty_result
@@ -325,7 +323,6 @@ class Registry:
         self._backends: dict[str, Any] = {}
         self._roles: dict[str, RoleRunner] = {}
 
-        # единый host для всего проекта
         self.ollama_host = (
             self.runtime.get("ollama_host")
             or self._host_from_chain(config)
@@ -335,7 +332,6 @@ class Registry:
 
     @staticmethod
     def _host_from_chain(config: dict) -> str | None:
-        """Совместимость: если ollama_host не задан, ищем явный host в бэкендах."""
         for role_cfg in config.get("roles", {}).values():
             for c in role_cfg.get("chain", []):
                 if c.get("backend") == "ollama" and c.get("host"):
@@ -354,20 +350,36 @@ class Registry:
             self._roles[name] = RoleRunner(name, self.config["roles"][name], self)
         return self._roles[name]
 
+    def has_role(self, name: str) -> bool:
+        return name in self.config.get("roles", {})
+
     # ---------- фазы VRAM ----------
 
-    def begin_phase(self, role_name: str) -> Phase:
-        runner = self.role(role_name)
-        wanted = {c.model for c in runner.chain if c.backend == "ollama"}
-        phase = Phase(name=role_name, ollama_models=wanted, t0=time.monotonic())
+    def begin_phase(self, *role_names: str) -> Phase:
+        """Открывает фазу. Можно передать несколько ролей — их модели
+        будут удерживаться в VRAM одновременно (без свопа)."""
+        if not role_names:
+            raise ValueError("begin_phase: не передано ни одной роли")
+
+        wanted: set[str] = set()
+        first_model: str | None = None
+        for rn in role_names:
+            runner = self.role(rn)
+            for c in runner.chain:
+                if c.backend == "ollama":
+                    wanted.add(c.model)
+                    if first_model is None:
+                        first_model = c.model
+
+        label = "+".join(role_names)
+        phase = Phase(name=label, ollama_models=wanted, t0=time.monotonic())
 
         if not self.runtime.get("phase_mode", True):
             return phase
 
-        print(f"[phase] enter '{role_name}' @ {self.ollama_host}, "
+        print(f"[phase] enter '{label}' @ {self.ollama_host}, "
               f"models: {wanted or '—'}")
 
-        # проверка доступности сервера
         if not self.ollama.ping():
             print(f"[phase]   ⚠ {self.ollama_host} недоступен — "
                   f"ollama-бэкенды упадут, сработает fallback")
@@ -377,10 +389,9 @@ class Registry:
                 if m not in wanted:
                     print(f"[phase]   unloading {m}")
                     self.ollama.unload(m)
-        if self.runtime.get("preload", True) and wanted:
-            first = next(c.model for c in runner.chain if c.backend == "ollama")
-            print(f"[phase]   preloading {first}")
-            self.ollama.preload(first, self.runtime.get("keep_alive", "30m"))
+        if self.runtime.get("preload", True) and first_model:
+            print(f"[phase]   preloading {first_model}")
+            self.ollama.preload(first_model, self.runtime.get("keep_alive", "30m"))
         return phase
 
     def end_phase(self, phase: Phase) -> None:
@@ -395,8 +406,7 @@ class Registry:
     # ---------- отчёт ----------
 
     def report(self) -> str:
-        lines = [f"Ollama host: {self.ollama_host}"]
-        lines.append("Отчёт по ролям:")
+        lines = [f"Ollama host: {self.ollama_host}", "Отчёт по ролям:"]
         for name, role in self._roles.items():
             ok = sum(1 for a in role.history if a.ok)
             fail = sum(1 for a in role.history if not a.ok)
