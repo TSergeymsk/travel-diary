@@ -9,6 +9,10 @@
 Поддерживает удалённый Ollama: адрес задаётся глобально через
 runtime.ollama_host в config.yaml и наследуется всеми ollama-бэкендами,
 если у конкретного бэкенда не указан собственный host.
+
+Параметр num_ctx в бэкенде ограничивает размер контекста модели —
+критично для 8 ГБ VRAM: без него Ollama берёт context_length из Modelfile,
+который у minicpm-v4.5 = 40960, и KV-кэш съедает лишние 2+ ГБ.
 """
 from __future__ import annotations
 
@@ -39,6 +43,7 @@ class BackendConfig:
     max_tokens: int = 1024
     keep_alive: str | None = None
     label: str | None = None
+    num_ctx: int | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "BackendConfig":
@@ -66,10 +71,13 @@ class _OllamaBackend:
         return {}
 
     def _options(self) -> dict:
-        return {
+        opts = {
             "temperature": self.cfg.temperature,
             "num_predict": self.cfg.max_tokens,
         }
+        if self.cfg.num_ctx:
+            opts["num_ctx"] = self.cfg.num_ctx
+        return opts
 
     def complete(self, system: str, user: str) -> str:
         r = self.client.chat(
@@ -173,15 +181,19 @@ class OllamaManager:
         except Exception as e:
             log.warning(f"unload {model} @ {self.host}: {e}")
 
-    def loaded(self) -> list[str]:
+    def loaded(self) -> list[dict]:
+        """Возвращает список {name, size_vram, size} загруженных моделей."""
         try:
             r = httpx.get(f"{self.host}/api/ps", timeout=5)
-            return [m["name"] for m in r.json().get("models", [])]
+            return r.json().get("models", [])
         except Exception:
             return []
 
+    def loaded_names(self) -> list[str]:
+        return [m["name"] for m in self.loaded()]
+
     def unload_all(self) -> None:
-        for m in self.loaded():
+        for m in self.loaded_names():
             self.unload(m)
 
     def ping(self) -> bool:
@@ -190,6 +202,19 @@ class OllamaManager:
             return r.status_code == 200
         except Exception:
             return False
+
+    def vram_report(self) -> str:
+        """Человекочитаемая сводка, кто сейчас в VRAM."""
+        items = self.loaded()
+        if not items:
+            return "(VRAM пуст)"
+        lines = []
+        for m in items:
+            size_gb = m.get("size", 0) / 1e9
+            vram_gb = m.get("size_vram", 0) / 1e9
+            pct = 100 * vram_gb / size_gb if size_gb else 0
+            lines.append(f"  {m['name']}: {vram_gb:.2f} / {size_gb:.2f} GB в VRAM ({pct:.0f}%)")
+        return "\n".join(lines)
 
 
 @dataclass
@@ -236,8 +261,6 @@ class RoleRunner:
         self.fb_truncate_n: int = int(fb.get("hard_truncate_sentences", 3))
         self.fb_auto_reduce_over: int = int(fb.get("auto_reduce_over_chars", 0))
 
-    # ---------- внутренний обход цепочки ----------
-
     def _try_each(self, call: Callable[[Any], str | None]) -> str | None:
         if not self.chain:
             return None
@@ -257,17 +280,13 @@ class RoleRunner:
                 continue
         return None
 
-    # ---------- публичные методы ----------
-
     def text(self, system: str, user: str, reduce_source: str = "") -> str:
         result = self._try_each(lambda b: b.complete(system, user))
-
         if result:
             if self.fb_auto_reduce_over and len(result) > self.fb_auto_reduce_over:
                 log.info(f"[{self.role_name}] auto-reduce: {len(result)} chars")
                 return self._reduce(result)
             return result
-
         log.error(f"[{self.role_name}] вся цепочка упала")
         if reduce_source:
             return self._reduce(reduce_source)
@@ -279,16 +298,12 @@ class RoleRunner:
         result = self._try_each(lambda b: b.describe_images(images, prompt))
         return result or self.empty_result
 
-    # ---------- аварийное сжатие ----------
-
     def _reduce(self, source: str) -> str:
         source = (source or "").strip()
         if not source:
             return self.empty_result
-
         if not self.fb_enabled or not self.fallback_role:
             return self._hard_truncate(source)
-
         if self.fallback_role == self.role_name:
             log.warning(f"[{self.role_name}] fallback_role указывает на себя — truncate")
             return self._hard_truncate(source)
@@ -353,11 +368,7 @@ class Registry:
     def has_role(self, name: str) -> bool:
         return name in self.config.get("roles", {})
 
-    # ---------- фазы VRAM ----------
-
     def begin_phase(self, *role_names: str) -> Phase:
-        """Открывает фазу. Можно передать несколько ролей — их модели
-        будут удерживаться в VRAM одновременно (без свопа)."""
         if not role_names:
             raise ValueError("begin_phase: не передано ни одной роли")
 
@@ -385,13 +396,19 @@ class Registry:
                   f"ollama-бэкенды упадут, сработает fallback")
 
         if self.runtime.get("unload_between_phases", True):
-            for m in self.ollama.loaded():
+            for m in self.ollama.loaded_names():
                 if m not in wanted:
                     print(f"[phase]   unloading {m}")
                     self.ollama.unload(m)
+
         if self.runtime.get("preload", True) and first_model:
             print(f"[phase]   preloading {first_model}")
             self.ollama.preload(first_model, self.runtime.get("keep_alive", "30m"))
+
+        # печатаем состояние VRAM после preload — сразу видно, влезла ли модель
+        report = self.ollama.vram_report()
+        if report:
+            print(f"[phase]   VRAM:\n{report}")
         return phase
 
     def end_phase(self, phase: Phase) -> None:
@@ -402,8 +419,6 @@ class Registry:
         if self.runtime.get("unload_between_phases", True):
             for m in phase.ollama_models:
                 self.ollama.unload(m)
-
-    # ---------- отчёт ----------
 
     def report(self) -> str:
         lines = [f"Ollama host: {self.ollama_host}", "Отчёт по ролям:"]

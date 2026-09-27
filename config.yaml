@@ -1,34 +1,26 @@
 # ============================================================
 #  Travel Diary — конфигурация
+#  Зрение — локально (Ollama), тексты — в облако (Groq/OpenRouter).
 # ============================================================
 
-# ---------- Управление VRAM Ollama ----------
 runtime:
-  # Адрес Ollama-сервера. Если Ollama на другом ПК — укажите его IP.
-  # Примеры:
-  #   http://localhost:11434
-  #   http://192.168.1.50:11434
-  #   http://gpu-server.local:11434
-  ollama_host: http://192.168.1.50:11434
+  ollama_host: http://192.168.2.2:11434
+  phase_mode: true
+  preload: true
+  unload_between_phases: true
+  keep_alive: 30m
 
-  phase_mode: true               # сначала вся vision-фаза, потом вся text-фаза
-  preload: true                  # прогревать модель пустым запросом
-  unload_between_phases: true    # выгружать модели после фазы
-  keep_alive: 30m                # сколько держать модель в VRAM внутри фазы
-
-# ---------- Поведение при падении цепочек ----------
 fallback:
-  enabled: true                  # глобальный выключатель fallback-логики
-  reduce_role: reduce            # имя роли для сжатия (по умолчанию)
-  hard_truncate_sentences: 3     # сколько первых предложений оставить в крайнем случае
-  auto_reduce_over_chars: 0      # авто-сжатие длинных ответов (0 = выключено)
+  enabled: true
+  reduce_role: reduce
+  hard_truncate_sentences: 3
+  auto_reduce_over_chars: 0
 
-# ---------- Роли (цепочки моделей) ----------
 roles:
 
-  # ============ Vision: описания кадров ============
+  # ============ Vision: локально ============
   vision:
-    fallback_role: reduce        # роль, к которой обратиться при падении всей цепочки
+    fallback_role: reduce
     empty_result: "Кадры этого места"
     chain:
       - backend: ollama
@@ -37,6 +29,7 @@ roles:
         keep_alive: 30m
         temperature: 0.4
         max_tokens: 400
+        num_ctx: 4096
 
       - backend: ollama
         model: llava:7b
@@ -44,39 +37,21 @@ roles:
         keep_alive: 30m
         temperature: 0.4
         max_tokens: 400
+        num_ctx: 4096
 
       - backend: ollama
         model: moondream:latest
         label: local-moondream
         temperature: 0.3
         max_tokens: 300
+        num_ctx: 2048
 
-      - backend: groq
-        model: llama-3.2-11b-vision-preview
-        label: groq-vision
-        api_key_env: GROQ_API_KEY
-        base_url: https://api.groq.com/openai/v1
-        max_tokens: 400
-
-      - backend: openrouter
-        model: qwen/qwen-2.5-vl-72b-instruct:free
-        label: openrouter-qwen-vl
-        api_key_env: OPENROUTER_API_KEY
-        base_url: https://openrouter.ai/api/v1
-        max_tokens: 400
-
-  # ============ Text: рассказ ============
+  # ============ Text: облако ============
   text:
     fallback_role: reduce
     empty_result: ""
     chain:
-      - backend: ollama
-        model: qwen2.5:7b
-        label: local-qwen2.5
-        keep_alive: 30m
-        temperature: 0.85
-        max_tokens: 1200
-
+      # 1. Основная модель — 70b на Groq, лучшее качество
       - backend: groq
         model: llama-3.3-70b-versatile
         label: groq-70b
@@ -85,22 +60,55 @@ roles:
         temperature: 0.85
         max_tokens: 1200
 
+      # 2. Быстрый резерв на Groq, спасает при 429 на 70b
+      - backend: groq
+        model: llama-3.1-8b-instant
+        label: groq-8b
+        api_key_env: GROQ_API_KEY
+        base_url: https://api.groq.com/openai/v1
+        temperature: 0.85
+        max_tokens: 1200
+
+      # 3. Аварийный роутер OpenRouter — сам выберет свободную free-модель
       - backend: openrouter
-        model: meta-llama/llama-3.3-70b-instruct:free
-        label: openrouter-70b
+        model: openrouter/free
+        label: openrouter-free-router
         api_key_env: OPENROUTER_API_KEY
         base_url: https://openrouter.ai/api/v1
         temperature: 0.85
         max_tokens: 1200
 
-      - backend: ollama
-        model: qwen3.5:9b
-        label: local-qwen3.5
-        temperature: 0.85
-        max_tokens: 1200
+  # ============ Proofread: облако, лёгкая модель ============
+  # Правка не требует 70b, поэтому основной — 8b на Groq (много квоты).
+  proofread:
+    empty_result: ""
+    chain:
+      - backend: groq
+        model: llama-3.1-8b-instant
+        label: groq-8b-proof
+        api_key_env: GROQ_API_KEY
+        base_url: https://api.groq.com/openai/v1
+        temperature: 0.15
+        max_tokens: 1500
 
-  # ============ Reduce: аварийное сжатие ============
-  # Без fallback_role — иначе возможна рекурсия.
+      - backend: groq
+        model: llama-3.3-70b-versatile
+        label: groq-70b-proof
+        api_key_env: GROQ_API_KEY
+        base_url: https://api.groq.com/openai/v1
+        temperature: 0.15
+        max_tokens: 1500
+
+      - backend: openrouter
+        model: openrouter/free
+        label: openrouter-free-proof
+        api_key_env: OPENROUTER_API_KEY
+        base_url: https://openrouter.ai/api/v1
+        temperature: 0.15
+        max_tokens: 1500
+
+  # ============ Reduce: локальный, на самый крайний случай ============
+  # Срабатывает только если и Groq, и OpenRouter недоступны.
   reduce:
     empty_result: ""
     chain:
@@ -109,19 +117,32 @@ roles:
         label: local-tiny
         keep_alive: 5m
         max_tokens: 250
+        num_ctx: 4096
 
       - backend: ollama
         model: qwen2.5:7b
         label: local-qwen2.5
         max_tokens: 250
+        num_ctx: 4096
 
 # ---------- Параметры обработки ----------
 processing:
-  vision_max_side: 768           # до какого размера уменьшать фото для VLM
-  export_max_side: 1600          # размер фото в HTML
-  cluster_radius_m: 400          # радиус склейки кадров в «место»
-  max_images_per_cluster: 4      # сколько кадров на кластер отдавать VLM
-  use_reverse_geocode: true      # Nominatim (нужен интернет)
+  vision_max_side: 512
+  export_max_side: 1600
+  cluster_radius_m: 400
+  max_images_per_cluster: 2
+  use_reverse_geocode: true
+
+  # ---- Дедупликация и диверсификация фото ----
+  max_photos_per_day: 6
+  dedup_time_window_s: 5
+  dedup_hash_threshold: 10
+  max_photos_per_cluster: 2
+
+  # ---- Интерполяция GPS из GPX ----
+  gps_interpolation_from_gpx: true
+  gps_interpolation_max_gap_min: 30
+  photo_tz_offset_hours: 3
 
 # ---------- Обогащение из интернета ----------
 search:
@@ -133,4 +154,4 @@ search:
 # ---------- Вывод ----------
 output:
   title: "Моё путешествие"
-  theme: dark                    # dark | light
+  theme: dark
