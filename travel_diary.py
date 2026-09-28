@@ -16,6 +16,8 @@ travel_diary.py — генерирует HTML-дневник путешеств�
        • фото переименовываются в slide_NN_MM.jpg по порядку слайдов
        • из фото вырезаются EXIF-метаданные
        • размер уменьшается до export_max_side
+       • на каждый слайд вешается id="slide-N"
+       • у каждого фото в разметке есть data-description/data-place/data-title
 """
 from __future__ import annotations
 
@@ -474,10 +476,8 @@ def export_photo_numbered(
     name = f"slide_{slide_num:02d}_{pic_num:02d}.jpg"
     dst = photos_dir / name
     img = Image.open(src)
-    # exif_transpose возвращает НОВЫЙ объект без EXIF.
     img = ImageOps.exif_transpose(img).convert("RGB")
     img.thumbnail((max_side, max_side))
-    # save() без параметра exif= гарантирует отсутствие метаданных.
     img.save(dst, format="JPEG", quality=85, optimize=True)
     return f"photos/{name}"
 
@@ -507,11 +507,6 @@ def dedupe_and_diversify(
     max_per_cluster: int = 2,
     exclude_paths: set[Path] | None = None,
 ) -> list[Photo]:
-    """
-    Возвращает до max_n разных фото по времени/хешу/кластеру.
-    exclude_paths — фото, которые нужно исключить (например, уже
-    использованные на слайдах локаций).
-    """
     if exclude_paths:
         photos = [p for p in photos if p.path not in exclude_paths]
     if not photos:
@@ -762,7 +757,6 @@ def proofread_text(proofread_runner, original: str) -> str:
 # ============================================================
 
 def dedup_wiki_texts(days: list[Day]) -> None:
-    """Одинаковый текст Википедии оставляем только на первом слайде."""
     seen: set[int] = set()
     for day in days:
         for c in day.clusters:
@@ -829,6 +823,20 @@ def pick_cover(days: list[Day], dedup_kwargs: dict) -> Photo | None:
         if picked:
             return picked[0]
     return None
+
+
+# ============================================================
+#  Хелпер: метаданные для одного фото
+# ============================================================
+
+def photo_meta_from_cluster(c: Cluster | None) -> dict:
+    if c is None:
+        return {"description": "", "place": "", "title": ""}
+    return {
+        "description": c.description or "",
+        "place": c.place or "",
+        "title": c.title or "",
+    }
 
 
 # ============================================================
@@ -1088,8 +1096,8 @@ def main():
         registry.end_phase(phase_b)
 
     # ---------- 7. Сборка структуры слайдов ----------
-    # На этом этапе слайды содержат объекты Photo в _photo_objs / _cover_photo.
-    # Реальный экспорт и переименование — на следующем шаге, когда известен
+    # Слайды содержат Photo-объекты в _photo_objs и метаданные в _photo_meta.
+    # Реальный экспорт и переименование — на следующем шаге, где известен
     # номер слайда.
     print("[6/7] Собираю слайды")
 
@@ -1134,6 +1142,12 @@ def main():
         })
 
     for i, day in enumerate(days, 1):
+        # карта: photo.path → cluster (для day-intro и transit)
+        photo_to_cluster: dict[Path, Cluster] = {}
+        for c in day.clusters:
+            for p in c.photos:
+                photo_to_cluster[p.path] = c
+
         if single_slide_days:
             day_photos = dedupe_and_diversify(
                 day.photos, max_n=max_photos_per_day,
@@ -1141,6 +1155,8 @@ def main():
                 hash_threshold=dedup_hash_threshold,
                 max_per_cluster=max_photos_per_cluster,
             )
+            meta = [photo_meta_from_cluster(photo_to_cluster.get(p.path))
+                    for p in day_photos]
             slides.append({
                 "kind": "day",
                 "index": i,
@@ -1155,11 +1171,11 @@ def main():
                     for c in day.clusters
                 ],
                 "_photo_objs": day_photos,
+                "_photo_meta": meta,
             })
             continue
 
-        # 1) ПРЕДВАРИТЕЛЬНО выбираем фото для каждого major-кластера,
-        #    чтобы day-intro не дублировал их.
+        # 1) предварительный выбор фото для major-кластеров
         location_picks: dict[int, list[Photo]] = {}
         used_paths: set[Path] = set()
         for c in day.major_clusters:
@@ -1172,7 +1188,7 @@ def main():
             location_picks[id(c)] = picked
             used_paths.update(p.path for p in picked)
 
-        # 2) day-intro: исключаем фото, уже занятые локациями
+        # 2) day-intro: фото, не занятые локациями
         if day.day_intro and len(day.major_clusters) >= day_intro_min_locations:
             intro_pool = dedupe_and_diversify(
                 day.photos, max_n=max_photos_per_day,
@@ -1181,7 +1197,6 @@ def main():
                 max_per_cluster=1,
                 exclude_paths=used_paths,
             )
-            # если всё уже разобрано локациями — падаем на обычный пул
             if not intro_pool:
                 intro_pool = dedupe_and_diversify(
                     day.photos, max_n=max_photos_per_day,
@@ -1190,6 +1205,8 @@ def main():
                     max_per_cluster=1,
                 )
             if intro_pool:
+                intro_meta = [photo_meta_from_cluster(photo_to_cluster.get(p.path))
+                              for p in intro_pool]
                 slides.append({
                     "kind": "day-intro",
                     "index": i,
@@ -1198,10 +1215,13 @@ def main():
                     "meta": f"{day.distance_km:.1f} км" if day.distance_km else "",
                     "narrative": day.day_intro,
                     "_photo_objs": intro_pool,
+                    "_photo_meta": intro_meta,
                 })
 
         # 3) слайды локаций
         for c in day.major_clusters:
+            picked = location_picks[id(c)]
+            meta = [photo_meta_from_cluster(c) for _ in picked]
             slides.append({
                 "kind": "location",
                 "index": i,
@@ -1213,10 +1233,11 @@ def main():
                 "narrative": c.narrative,
                 "description": c.description,
                 "wiki": c.wiki,
-                "_photo_objs": location_picks[id(c)],
+                "_photo_objs": picked,
+                "_photo_meta": meta,
             })
 
-        # 4) transit для minor — фото, не использованные локациями
+        # 4) transit
         minor_with_photos = [c for c in day.minor_clusters if c.photos]
         total_minor_photos = sum(len(c.photos) for c in minor_with_photos)
         if (len(minor_with_photos) >= transit_min_clusters
@@ -1239,6 +1260,8 @@ def main():
                     max_per_cluster=1,
                 )
             if picked:
+                meta = [photo_meta_from_cluster(photo_to_cluster.get(p.path))
+                        for p in picked]
                 slides.append({
                     "kind": "transit",
                     "index": i,
@@ -1249,6 +1272,7 @@ def main():
                         for c in minor_with_photos
                     ],
                     "_photo_objs": picked,
+                    "_photo_meta": meta,
                 })
 
     slides.append({"kind": "finale", "title": "Послесловие", "text": finale})
@@ -1259,7 +1283,6 @@ def main():
     photos_dir = out / "photos"
     photos_dir.mkdir(parents=True, exist_ok=True)
 
-    # Чистим старые slide_*.jpg, чтобы не копились хвосты от прошлых прогонов.
     for old in photos_dir.glob("slide_*.jpg"):
         try:
             old.unlink()
@@ -1267,7 +1290,7 @@ def main():
             pass
 
     for s_idx, s in enumerate(slides, 1):
-        # обложка
+        # ---- обложка ----
         cover_obj = s.pop("_cover_photo", None)
         if s.get("kind") == "cover":
             if cover_obj is not None:
@@ -1280,19 +1303,29 @@ def main():
             else:
                 s["photo"] = ""
 
-        # обычные слайды с фото
+        # ---- обычные слайды ----
         photo_objs = s.pop("_photo_objs", None)
+        photo_meta = s.pop("_photo_meta", None)
         if photo_objs is not None:
-            urls: list[str] = []
+            photos_list: list[dict] = []
             for k, p in enumerate(photo_objs, 1):
                 if p is None:
                     continue
                 try:
-                    urls.append(export_photo_numbered(
-                        p.path, photos_dir, s_idx, k, export_max_side))
+                    url = export_photo_numbered(
+                        p.path, photos_dir, s_idx, k, export_max_side)
                 except Exception as e:
                     print(f"      ! {p.path.name}: {e}", file=sys.stderr)
-            s["photos"] = urls
+                    continue
+                meta = (photo_meta[k - 1]
+                        if photo_meta and k - 1 < len(photo_meta) else {})
+                photos_list.append({
+                    "url": url,
+                    "description": meta.get("description", ""),
+                    "place": meta.get("place", ""),
+                    "title": meta.get("title", ""),
+                })
+            s["photos"] = photos_list
 
     templates_dir = Path(__file__).parent / "templates"
     env = Environment(loader=FileSystemLoader(str(templates_dir)), autoescape=True)

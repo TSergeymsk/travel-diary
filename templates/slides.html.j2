@@ -232,22 +232,50 @@
   .lightbox {
     position: fixed; inset: 0; z-index: 100;
     display: none;
-    background: rgba(0, 0, 0, .92);
+    background: rgba(0, 0, 0, .93);
     backdrop-filter: blur(4px);
     align-items: center; justify-content: center;
     animation: lb-fade .15s ease;
+    padding: 2vh 0;
+    overflow-y: auto;
   }
   .lightbox.open { display: flex; }
-  @keyframes lb-fade {
-    from { opacity: 0; } to { opacity: 1; }
+  @keyframes lb-fade { from { opacity: 0; } to { opacity: 1; } }
+
+  .lb-stage {
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: .9em;
+    max-width: 94vw;
   }
   .lb-img {
-    max-width: 92vw; max-height: 88vh;
+    max-width: 94vw; max-height: 74vh;
     object-fit: contain;
     border-radius: 4px;
     box-shadow: 0 20px 60px rgba(0,0,0,.5);
     user-select: none;
   }
+  .lb-info {
+    max-width: min(60em, 94vw);
+    text-align: center;
+    color: #ccc;
+    font-size: .95rem; line-height: 1.55;
+    padding: 0 1em;
+  }
+  .lb-place {
+    color: var(--accent);
+    letter-spacing: .2em; text-transform: uppercase;
+    font-size: .72rem; margin-bottom: .35em;
+  }
+  .lb-title {
+    font-size: 1.15rem; color: #fff;
+    margin-bottom: .45em;
+  }
+  .lb-description {
+    font-style: italic; color: rgba(255,255,255,.78);
+  }
+  .lb-place:empty, .lb-title:empty, .lb-description:empty { display: none; }
+
   .lb-btn {
     position: absolute;
     background: rgba(0,0,0,.4);
@@ -276,8 +304,8 @@
   .lb-prev::before { content: "‹"; }
   .lb-next::before { content: "›"; }
   .lb-counter {
-    position: absolute; bottom: 3vh; left: 50%; transform: translateX(-50%);
-    color: #ccc; font-size: .95rem; letter-spacing: .15em;
+    position: absolute; bottom: 2.5vh; left: 50%; transform: translateX(-50%);
+    color: #ccc; font-size: .9rem; letter-spacing: .15em;
     padding: .3em 1em; border-radius: 999px;
     background: rgba(0,0,0,.4);
   }
@@ -297,18 +325,41 @@
   }
   #nav button:hover { border-color: var(--accent); color: var(--accent); }
   #counter { min-width: 5em; text-align: center; letter-spacing: .1em; }
+
+  #nav .nav-center {
+    display: flex; align-items: center; gap: 1.2em;
+    pointer-events: auto;
+  }
+  #copy-link {
+    font-size: .78rem;
+    padding: .35em .9em;
+  }
+
   #progress {
     position: fixed; top: 0; left: 0; height: 3px;
     background: var(--accent); transition: width .3s; z-index: 11;
   }
+
+  /* ---- toast ---- */
+  #toast {
+    position: fixed; bottom: 8vh; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,.85); color: #eee;
+    padding: .5em 1.2em; border-radius: 999px;
+    font-size: .85rem; letter-spacing: .05em;
+    opacity: 0; pointer-events: none;
+    transition: opacity .25s; z-index: 200;
+  }
+  #toast.show { opacity: 1; }
 </style>
 </head>
 <body data-theme="{{ theme }}">
 <div id="progress" style="width:0"></div>
 <div id="deck">
   {% for s in slides %}
+    {% set slide_id = 'slide-' ~ loop.index %}
+
     {% if s.kind == 'cover' %}
-      <section class="slide slide--cover">
+      <section class="slide slide--cover" id="{{ slide_id }}">
         {% if s.photo %}<div class="cover-bg" style="background-image:url('{{ s.photo }}')"></div>{% endif %}
         <h1>{{ s.title }}</h1>
         <div class="sub">{{ s.subtitle }}</div>
@@ -316,7 +367,7 @@
       </section>
 
     {% elif s.kind in ('intro', 'finale') %}
-      <section class="slide slide--{{ s.kind }}">
+      <section class="slide slide--{{ s.kind }}" id="{{ slide_id }}">
         <div class="inner">
           <h2>{{ s.title }}</h2>
           <p>{{ s.text }}</p>
@@ -324,7 +375,7 @@
       </section>
 
     {% elif s.kind == 'overview' %}
-      <section class="slide slide--overview">
+      <section class="slide slide--overview" id="{{ slide_id }}">
         <div class="inner">
           <h2>{{ s.title }}</h2>
           <div class="route-narrative">{{ s.narrative }}</div>
@@ -342,7 +393,7 @@
       </section>
 
     {% elif s.kind == 'day-intro' %}
-      <section class="slide slide--day-intro">
+      <section class="slide slide--day-intro" id="{{ slide_id }}">
         <div class="day-header">
           <div class="day-meta">День {{ s.index }} · {{ s.date }}</div>
           <h2>{{ s.title }}</h2>
@@ -350,14 +401,26 @@
         </div>
         <p class="day-intro-text">{{ s.narrative }}</p>
         <div class="day-photo-strip">
-          {% for p in s.photos %}<img src="{{ p }}" alt="" loading="lazy">{% endfor %}
+          {% for p in s.photos %}
+            <img src="{{ p.url }}"
+                 data-description="{{ p.description }}"
+                 data-place="{{ p.place }}"
+                 data-title="{{ p.title }}"
+                 alt="" loading="lazy">
+          {% endfor %}
         </div>
       </section>
 
     {% elif s.kind == 'location' %}
-      <section class="slide slide--location{% if s.index % 2 == 0 %} reverse{% endif %}">
+      <section class="slide slide--location{% if s.index % 2 == 0 %} reverse{% endif %}" id="{{ slide_id }}">
         <div class="photo-col count-{{ s.photos|length }}">
-          {% for p in s.photos %}<img src="{{ p }}" alt="" loading="lazy">{% endfor %}
+          {% for p in s.photos %}
+            <img src="{{ p.url }}"
+                 data-description="{{ p.description }}"
+                 data-place="{{ p.place }}"
+                 data-title="{{ p.title }}"
+                 alt="" loading="lazy">
+          {% endfor %}
         </div>
         <div class="text-col">
           <div class="day-meta">День {{ s.index }} · {{ s.date }}</div>
@@ -371,13 +434,19 @@
       </section>
 
     {% elif s.kind == 'transit' %}
-      <section class="slide slide--transit">
+      <section class="slide slide--transit" id="{{ slide_id }}">
         <div class="head">
           <div class="day-meta">День {{ s.index }} · {{ s.date }}</div>
           <h2>Между локациями</h2>
         </div>
         <div class="transit-photos">
-          {% for p in s.photos %}<img src="{{ p }}" alt="" loading="lazy">{% endfor %}
+          {% for p in s.photos %}
+            <img src="{{ p.url }}"
+                 data-description="{{ p.description }}"
+                 data-place="{{ p.place }}"
+                 data-title="{{ p.title }}"
+                 alt="" loading="lazy">
+          {% endfor %}
         </div>
         <div class="transit-list">
           {% for c in s.clusters %}
@@ -391,9 +460,15 @@
       </section>
 
     {% elif s.kind == 'day' %}
-      <section class="slide slide--day{% if s.index % 2 == 0 %} reverse{% endif %}">
+      <section class="slide slide--day{% if s.index % 2 == 0 %} reverse{% endif %}" id="{{ slide_id }}">
         <div class="photo-col count-{{ s.photos|length }}">
-          {% for p in s.photos %}<img src="{{ p }}" alt="" loading="lazy">{% endfor %}
+          {% for p in s.photos %}
+            <img src="{{ p.url }}"
+                 data-description="{{ p.description }}"
+                 data-place="{{ p.place }}"
+                 data-title="{{ p.title }}"
+                 alt="" loading="lazy">
+          {% endfor %}
         </div>
         <div class="text-col">
           <div class="day-meta">День {{ s.index }} · {{ s.date }}</div>
@@ -423,16 +498,28 @@
 <div id="lightbox" class="lightbox" aria-hidden="true">
   <button class="lb-btn lb-close" aria-label="Закрыть">×</button>
   <button class="lb-btn lb-prev" aria-label="Предыдущее фото"></button>
-  <img class="lb-img" alt="">
+  <div class="lb-stage">
+    <img class="lb-img" alt="">
+    <div class="lb-info">
+      <div class="lb-place"></div>
+      <div class="lb-title"></div>
+      <div class="lb-description"></div>
+    </div>
+  </div>
   <button class="lb-btn lb-next" aria-label="Следующее фото"></button>
   <div class="lb-counter"></div>
 </div>
 
 <div id="nav">
   <button id="prev">← Назад</button>
-  <span id="counter"></span>
+  <div class="nav-center">
+    <span id="counter"></span>
+    <button id="copy-link" title="Скопировать ссылку на этот слайд">🔗 Ссылка</button>
+  </div>
   <button id="next">Вперёд →</button>
 </div>
+
+<div id="toast"></div>
 
 <script>
   // ---------- слайды ----------
@@ -441,19 +528,63 @@
   const bar = document.getElementById('progress');
   let i = 0;
 
+  function updateHash() {
+    const newHash = `#slide-${i + 1}`;
+    if (location.hash !== newHash) {
+      history.replaceState(null, '', newHash);
+    }
+  }
+
   function show(n) {
     i = Math.max(0, Math.min(slides.length - 1, n));
     slides.forEach((s, k) => s.classList.toggle('active', k === i));
     counter.textContent = `${i + 1} / ${slides.length}`;
     bar.style.width = ((i + 1) / slides.length * 100) + '%';
+    updateHash();
   }
   document.getElementById('prev').onclick = () => show(i - 1);
   document.getElementById('next').onclick = () => show(i + 1);
+
+  // ---------- копирование ссылки на слайд ----------
+  const toastEl = document.getElementById('toast');
+  let toastTimer = null;
+  function showToast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove('show'), 1800);
+  }
+
+  document.getElementById('copy-link').onclick = async () => {
+    const baseUrl = location.href.split('#')[0];
+    const url = `${baseUrl}#slide-${i + 1}`;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(url);
+      } else {
+        // fallback для file:// и http без secure context
+        const tmp = document.createElement('textarea');
+        tmp.value = url;
+        tmp.style.position = 'fixed';
+        tmp.style.opacity = '0';
+        document.body.appendChild(tmp);
+        tmp.select();
+        document.execCommand('copy');
+        document.body.removeChild(tmp);
+      }
+      showToast('Ссылка скопирована');
+    } catch (err) {
+      showToast('Не удалось скопировать');
+    }
+  };
 
   // ---------- lightbox ----------
   const lb = document.getElementById('lightbox');
   const lbImg = lb.querySelector('.lb-img');
   const lbCounter = lb.querySelector('.lb-counter');
+  const lbPlace = lb.querySelector('.lb-place');
+  const lbTitle = lb.querySelector('.lb-title');
+  const lbDesc = lb.querySelector('.lb-description');
   const lbPrev = lb.querySelector('.lb-prev');
   const lbNext = lb.querySelector('.lb-next');
   let lbPhotos = [];
@@ -461,9 +592,13 @@
 
   function lbRender() {
     if (!lbPhotos.length) return;
-    lbImg.src = lbPhotos[lbIndex].src;
-    lbImg.alt = lbPhotos[lbIndex].alt || '';
+    const el = lbPhotos[lbIndex];
+    lbImg.src = el.src;
+    lbImg.alt = el.alt || '';
     lbCounter.textContent = `${lbIndex + 1} / ${lbPhotos.length}`;
+    lbPlace.textContent = el.dataset.place || '';
+    lbTitle.textContent = el.dataset.title || '';
+    lbDesc.textContent = el.dataset.description || '';
     const multi = lbPhotos.length > 1;
     lbPrev.style.display = multi ? '' : 'none';
     lbNext.style.display = multi ? '' : 'none';
@@ -488,33 +623,24 @@
     lbRender();
   }
 
-  // клики по фото на любом слайде — открываем lightbox
   document.querySelectorAll('.slide img').forEach(img => {
     img.addEventListener('click', e => {
       e.preventDefault();
       e.stopPropagation();
       const slide = img.closest('.slide');
-      // фото именно этого слайда, в порядке DOM
       const slideImgs = [...slide.querySelectorAll('img')];
       const idx = slideImgs.indexOf(img);
       lbOpen(slideImgs, idx >= 0 ? idx : 0);
     });
   });
 
-  lb.querySelector('.lb-close').onclick = e => {
-    e.stopPropagation(); lbClose();
-  };
+  lb.querySelector('.lb-close').onclick = e => { e.stopPropagation(); lbClose(); };
   lbPrev.onclick = e => { e.stopPropagation(); lbNav(-1); };
   lbNext.onclick = e => { e.stopPropagation(); lbNav(1); };
-
-  // клик по фону (не по картинке и не по кнопке) — закрыть
-  lb.addEventListener('click', e => {
-    if (e.target === lb) lbClose();
-  });
+  lb.addEventListener('click', e => { if (e.target === lb) lbClose(); });
 
   // ---------- клавиатура ----------
   document.addEventListener('keydown', e => {
-    // если открыт lightbox — перехватываем стрелки/Esc
     if (lb.classList.contains('open')) {
       if (e.key === 'Escape') { e.preventDefault(); lbClose(); return; }
       if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') {
@@ -523,9 +649,8 @@
       if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
         e.preventDefault(); lbNav(-1); return;
       }
-      return; // остальное игнорируем, пока открыт lightbox
+      return;
     }
-    // обычная навигация по слайдам
     if (['ArrowRight', ' ', 'PageDown'].includes(e.key)) {
       e.preventDefault(); show(i + 1);
     }
@@ -536,7 +661,22 @@
     if (e.key === 'End') show(slides.length - 1);
   });
 
-  show(0);
+  // ---------- hash-навигация ----------
+  function slideFromHash() {
+    const m = location.hash.match(/^#slide-(\d+)$/);
+    if (!m) return null;
+    const n = parseInt(m[1], 10) - 1;
+    return (n >= 0 && n < slides.length) ? n : null;
+  }
+
+  window.addEventListener('hashchange', () => {
+    const n = slideFromHash();
+    if (n !== null && n !== i) show(n);
+  });
+
+  // старт: если в URL есть #slide-N — открываем его, иначе первый
+  const initial = slideFromHash();
+  show(initial !== null ? initial : 0);
 </script>
 </body>
 </html>
