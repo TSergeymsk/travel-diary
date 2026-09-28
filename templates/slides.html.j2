@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>{{ title }}</title>
 <style>
   * { box-sizing: border-box; }
@@ -19,11 +19,13 @@
     font-family: 'Iowan Old Style','Palatino','Georgia',serif;
     background: var(--bg); color: var(--fg); overflow: hidden;
   }
-  #deck { position: relative; height: 100vh; }
+  #deck { position: relative; height: 100vh; height: 100dvh; }
   .slide {
     position: absolute; inset: 0; display: none;
     padding: 6vh 6vw 10vh;
     animation: fade .5s ease;
+    overflow-y: auto; overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
   }
   .slide.active { display: grid; }
   @keyframes fade {
@@ -32,7 +34,7 @@
   }
 
   /* ---- обложка ---- */
-  .slide--cover { grid-template-columns: 1fr; place-items: center; text-align: center; }
+  .slide--cover { grid-template-columns: 1fr; place-items: center; text-align: center; overflow: hidden; }
   .slide--cover .cover-bg {
     position: absolute; inset: 0; z-index: 0;
     background-size: cover; background-position: center;
@@ -83,14 +85,22 @@
   }
   .route-stops li {
     display: grid;
-    grid-template-columns: 4.5em 3em 1fr auto;
+    grid-template-columns: minmax(5em, auto) minmax(4.5em, auto) 1fr auto;
     gap: .8em; align-items: baseline;
     font-size: .98rem;
   }
-  .route-stops .stop-day { color: var(--accent); letter-spacing: .08em; font-size: .78rem; text-transform: uppercase; }
-  .route-stops .stop-date { color: var(--muted); font-size: .82rem; }
+  .route-stops .stop-day {
+    color: var(--accent); letter-spacing: .08em;
+    font-size: .78rem; text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .route-stops .stop-date { color: var(--muted); font-size: .82rem; white-space: nowrap; }
   .route-stops .stop-place { color: var(--fg); }
-  .route-stops .stop-km { color: var(--muted); font-size: .82rem; }
+  .route-stops .stop-km { color: var(--muted); font-size: .82rem; white-space: nowrap; }
+  .route-stops .stop-count {
+    color: var(--accent); font-size: .78rem; opacity: .8;
+    margin-left: .35em;
+  }
 
   /* ---- day-intro ---- */
   .slide--day-intro {
@@ -316,6 +326,7 @@
     display: flex; justify-content: space-between; align-items: center;
     padding: 0 6vw; pointer-events: none; z-index: 10;
     font-size: .85rem; color: var(--muted);
+    padding-bottom: env(safe-area-inset-bottom, 0);
   }
   #nav button {
     pointer-events: auto; background: transparent;
@@ -333,6 +344,7 @@
   #copy-link {
     font-size: .78rem;
     padding: .35em .9em;
+    white-space: nowrap;
   }
 
   #progress {
@@ -348,8 +360,174 @@
     font-size: .85rem; letter-spacing: .05em;
     opacity: 0; pointer-events: none;
     transition: opacity .25s; z-index: 200;
+    white-space: nowrap;
   }
   #toast.show { opacity: 1; }
+
+  /* ============================================================
+     Адаптив: планшет
+     ============================================================ */
+  @media (max-width: 1024px) {
+    .slide { padding: 5vh 5vw 13vh; }
+    .slide--location, .slide--day { gap: 3vw; }
+    .slide--overview .inner { gap: 3vw; }
+    .day-photo-strip { gap: .5vw; }
+    .photo-col { gap: .5vw; }
+  }
+
+  /* ============================================================
+     Адаптив: планшет portrait / небольшой ноутбук
+     ============================================================ */
+  @media (max-width: 900px) {
+    .slide { padding: 4vh 5vw 15vh; }
+
+    /* location / day → одна колонка */
+    .slide--location, .slide--day {
+      grid-template-columns: 1fr;
+      gap: 3vh;
+      align-items: start;
+    }
+    .slide--location.reverse .photo-col,
+    .slide--day.reverse .photo-col { order: 0; }
+    .photo-col { max-height: 46vh; }
+    .text-col { max-height: none; overflow-y: visible; padding-right: 0; }
+
+    /* обзор маршрута → одна колонка */
+    .slide--overview .inner {
+      grid-template-columns: 1fr;
+      gap: 3vh;
+    }
+    .route-stops {
+      padding-left: 1em;
+      gap: .55em;
+    }
+    .route-stops li {
+      grid-template-columns: auto auto 1fr;
+      grid-template-rows: auto auto;
+      gap: .15em .7em;
+      font-size: .92rem;
+    }
+    .route-stops .stop-day  { grid-column: 1; grid-row: 1; }
+    .route-stops .stop-date { grid-column: 2; grid-row: 1; }
+    .route-stops .stop-km   { grid-column: 3; grid-row: 1; text-align: right; }
+    .route-stops .stop-place{ grid-column: 1 / -1; grid-row: 2; }
+
+    /* transit → одна колонка описаний */
+    .transit-list { grid-template-columns: 1fr; gap: .5em; }
+
+    /* day-intro компактнее */
+    .day-photo-strip { gap: .4vw; max-height: 30vh; }
+    .day-intro-text { font-size: 1rem; }
+
+    /* навигация компактнее */
+    #nav { padding: 0 4vw; font-size: .78rem; }
+    #nav button { padding: .35em .9em; }
+    #counter { min-width: auto; }
+
+    /* lightbox */
+    .lb-img { max-height: 62vh; }
+  }
+
+  /* ============================================================
+     Адаптив: мобильник portrait
+     ============================================================ */
+  @media (max-width: 640px) {
+    .slide { padding: 3.5vh 4vw 17vh; }
+
+    /* обложка */
+    .slide--cover h1 { font-size: clamp(1.7rem, 8vw, 2.6rem); }
+    .slide--cover .sub { font-size: 1rem; }
+    .slide--cover .meta { margin-top: 1.4em; font-size: .72rem; letter-spacing: .2em; }
+
+    /* пролог / финал */
+    .slide--intro p, .slide--finale p {
+      font-size: 1rem; line-height: 1.7;
+    }
+
+    /* обзор маршрута */
+    .slide--overview h2 { font-size: .75rem; letter-spacing: .22em; }
+    .route-narrative { font-size: .95rem; line-height: 1.6; }
+    .route-stops li {
+      grid-template-columns: 1fr auto;
+      grid-template-rows: auto auto auto;
+      gap: .1em .5em;
+      font-size: .88rem;
+    }
+    .route-stops .stop-day  { grid-column: 1; grid-row: 1; }
+    .route-stops .stop-date { grid-column: 1; grid-row: 1; margin-left: 5.5em; }
+    .route-stops .stop-km   { grid-column: 2; grid-row: 1; text-align: right; }
+    .route-stops .stop-place{ grid-column: 1 / -1; grid-row: 2; }
+
+    /* фото в один столбец */
+    .photo-col {
+      grid-template-columns: 1fr;
+      max-height: none;
+      gap: 8px;
+    }
+    .photo-col img { max-height: 42vh; height: auto; }
+    .photo-col.count-3 img:first-child,
+    .photo-col.count-5 img:first-child { grid-row: auto; }
+    .photo-col.count-1 img { max-height: 46vh; }
+
+    /* day-photo-strip → сетка снизу */
+    .day-photo-strip {
+      grid-auto-flow: row;
+      grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+      grid-auto-columns: auto;
+      max-height: none;
+      gap: 6px;
+    }
+    .day-photo-strip img { height: auto; aspect-ratio: 4 / 3; }
+
+    /* transit */
+    .transit-photos {
+      grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+      max-height: none;
+      gap: 6px;
+    }
+    .transit-photos img { height: auto; aspect-ratio: 4 / 3; }
+
+    /* типографика текста */
+    .text-col h2 { font-size: 1.35rem; line-height: 1.2; }
+    .text-col .narrative { font-size: .98rem; line-height: 1.65; }
+    .text-col .wiki { font-size: .85rem; }
+    .text-col .vision { font-size: .82rem; }
+    .day-header h2 { font-size: 1.3rem; }
+    .day-header .day-km { font-size: .85rem; }
+    .day-intro-text { font-size: .95rem; line-height: 1.6; }
+
+    /* навигация */
+    #nav { padding: 0 3vw; font-size: .72rem; gap: .5em; }
+    #nav button { padding: .35em .75em; }
+    #nav .nav-center { gap: .6em; }
+    #copy-link { font-size: .7rem; padding: .3em .7em; }
+
+    /* lightbox */
+    .lb-img { max-height: 55vh; }
+    .lb-info { font-size: .85rem; padding: 0 .8em; }
+    .lb-place { font-size: .65rem; margin-bottom: .25em; }
+    .lb-title { font-size: 1rem; margin-bottom: .35em; }
+    .lb-close { width: 2.4em; height: 2.4em; font-size: 1.15rem; top: 1.5vh; right: 3vw; }
+    .lb-prev, .lb-next { width: 2.6em; height: 2.6em; font-size: 1.3rem; }
+    .lb-prev { left: 3vw; } .lb-next { right: 3vw; }
+    .lb-counter { font-size: .8rem; bottom: 1.2vh; }
+    #toast { font-size: .8rem; bottom: 10vh; }
+  }
+
+  /* ============================================================
+     Мобильник landscape (короткая высота) — особый случай
+     ============================================================ */
+  @media (max-height: 480px) and (orientation: landscape) {
+    .slide { padding: 3vh 4vw 12vh; }
+    .slide--location, .slide--day {
+      grid-template-columns: 1fr 1fr;
+      gap: 3vw;
+      align-items: start;
+    }
+    .photo-col { max-height: 62vh; }
+    .text-col { max-height: 62vh; overflow-y: auto; }
+    .lb-img { max-height: 72vh; }
+  }
 </style>
 </head>
 <body data-theme="{{ theme }}">
@@ -382,9 +560,11 @@
           <ol class="route-stops">
             {% for stop in s.stops %}
               <li>
-                <span class="stop-day">День {{ stop.day }}</span>
+                <span class="stop-day">{{ stop.day }}</span>
                 <span class="stop-date">{{ stop.date }}</span>
-                <span class="stop-place">{{ stop.place }}</span>
+                <span class="stop-place">
+                  {{ stop.place }}{% if stop.days_count and stop.days_count > 1 %}<span class="stop-count">· {{ stop.days_label }}</span>{% endif %}
+                </span>
                 <span class="stop-km">{{ stop.km }}</span>
               </li>
             {% endfor %}
@@ -541,6 +721,9 @@
     counter.textContent = `${i + 1} / ${slides.length}`;
     bar.style.width = ((i + 1) / slides.length * 100) + '%';
     updateHash();
+    // прокрутка в начало на мобильных, где слайд может быть прокручиваемым
+    const cur = slides[i];
+    if (cur) cur.scrollTop = 0;
   }
   document.getElementById('prev').onclick = () => show(i - 1);
   document.getElementById('next').onclick = () => show(i + 1);
@@ -562,7 +745,6 @@
       if (navigator.clipboard && window.isSecureContext) {
         await navigator.clipboard.writeText(url);
       } else {
-        // fallback для file:// и http без secure context
         const tmp = document.createElement('textarea');
         tmp.value = url;
         tmp.style.position = 'fixed';
@@ -639,6 +821,40 @@
   lbNext.onclick = e => { e.stopPropagation(); lbNav(1); };
   lb.addEventListener('click', e => { if (e.target === lb) lbClose(); });
 
+  // ---------- свайпы на мобильных ----------
+  // По слайду — перелистывание слайдов; в lightbox — фото.
+  function attachSwipe(el, onLeft, onRight) {
+    let startX = 0, startY = 0, t0 = 0;
+    let tracking = false;
+    el.addEventListener('touchstart', e => {
+      if (e.touches.length !== 1) return;
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      t0 = Date.now();
+      tracking = true;
+    }, { passive: true });
+    el.addEventListener('touchend', e => {
+      if (!tracking) return;
+      tracking = false;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - startX;
+      const dy = t.clientY - startY;
+      const dt = Date.now() - t0;
+      // короткий быстрый горизонтальный свайп
+      if (dt < 600 && Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.3) {
+        if (dx < 0) onLeft();
+        else onRight();
+      }
+    }, { passive: true });
+  }
+
+  attachSwipe(document.getElementById('deck'),
+              () => show(i + 1),
+              () => show(i - 1));
+  attachSwipe(lb,
+              () => lbNav(1),
+              () => lbNav(-1));
+
   // ---------- клавиатура ----------
   document.addEventListener('keydown', e => {
     if (lb.classList.contains('open')) {
@@ -674,7 +890,6 @@
     if (n !== null && n !== i) show(n);
   });
 
-  // старт: если в URL есть #slide-N — открываем его, иначе первый
   const initial = slideFromHash();
   show(initial !== null ? initial : 0);
 </script>

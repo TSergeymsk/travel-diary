@@ -84,6 +84,18 @@ def dedup_consecutive(items: list[str]) -> list[str]:
     return out
 
 
+def format_day_count(n: int) -> str:
+    """1 → '1 день', 2 → '2 дня', 5 → '5 дней'."""
+    if 11 <= n % 100 <= 14:
+        return f"{n} дней"
+    last = n % 10
+    if last == 1:
+        return f"{n} день"
+    if 2 <= last <= 4:
+        return f"{n} дня"
+    return f"{n} дней"
+
+
 # ============================================================
 #  Модели данных
 # ============================================================
@@ -826,8 +838,57 @@ def pick_cover(days: list[Day], dedup_kwargs: dict) -> Photo | None:
 
 
 # ============================================================
-#  Хелпер: метаданные для одного фото
+#  Хелперы для маршрута и метаданных фото
 # ============================================================
+
+def _day_places_key(d: Day) -> str:
+    """Строка-идентификатор набора локаций дня, для группировки в сводке."""
+    places = [c.place for c in d.major_clusters if c.place]
+    places = dedup_consecutive(places)
+    return " → ".join(places)
+
+
+def build_route_stops(days: list[Day]) -> list[dict]:
+    """
+    Группирует подряд идущие дни с одинаковым набором локаций:
+      Дни 1–4 · 11.08–14.08 · Фетхие, Турция · 15 км · 4 дня
+    Дни с несколькими локациями (переезды) остаются отдельными строками.
+    """
+    stops: list[dict] = []
+    n = len(days)
+    i = 0
+    while i < n:
+        key = _day_places_key(days[i])
+        if not key:
+            i += 1
+            continue
+
+        j = i
+        while j + 1 < n and _day_places_key(days[j + 1]) == key:
+            j += 1
+
+        days_count = j - i + 1
+        km_total = sum(days[k].distance_km for k in range(i, j + 1))
+
+        if days_count == 1:
+            day_label = f"День {i + 1}"
+            date_label = days[i].date.strftime("%d.%m")
+        else:
+            day_label = f"Дни {i + 1}–{j + 1}"
+            date_label = (f"{days[i].date.strftime('%d.%m')}–"
+                          f"{days[j].date.strftime('%d.%m')}")
+
+        stops.append({
+            "day": day_label,
+            "date": date_label,
+            "place": key,
+            "km": f"{km_total:.0f} км" if km_total else "",
+            "days_count": days_count,
+            "days_label": format_day_count(days_count),
+        })
+        i = j + 1
+    return stops
+
 
 def photo_meta_from_cluster(c: Cluster | None) -> dict:
     if c is None:
@@ -1011,7 +1072,7 @@ def main():
             for day in days:
                 for c in day.clusters:
                     n += 1
-                    print(f"      [{n}/{total}] {day.date} · "
+                    print(f"      [vision {n}/{total}] {day.date} · "
                           f"{len(c.photos)} фото · {c.place or '—'}")
                     c.description = describe_cluster(
                         vision, c, max_img, vision_max_side)
@@ -1022,17 +1083,49 @@ def main():
 
     # ---------- 6. ФАЗА B: TEXT + PROOFREAD ----------
     print("[5/7] Фаза B: тексты и вычитка")
-    route_overview = intro = finale = ""
+
+    # ---- Считаем общее количество LLM-вызовов заранее ----
+    n_titles = sum(1 for d in days for c in d.clusters if c.description)
+    n_narratives = 0
+    n_day_intros = 0
+    if not single_slide_days:
+        for d in days:
+            for c in d.major_clusters:
+                if c.description or c.wiki:
+                    n_narratives += 1
+            if len(d.major_clusters) >= day_intro_min_locations:
+                n_day_intros += 1
+            elif d.major_clusters:
+                c0 = d.major_clusters[0]
+                if not (c0.description or c0.wiki):
+                    n_narratives += 1
+
+    n_overview_calls = 1 if (generate_route_overview and len(days) > 1) else 0
+    text_total = n_titles + n_narratives + n_day_intros + n_overview_calls + 2
+
     do_proof = proofread is not None and not args.skip_proofread
+
+    # ---- Счётчики прогресса ----
+    text_done = 0
+
+    def text_step(label: str) -> None:
+        nonlocal text_done
+        text_done += 1
+        print(f"      [text {text_done}/{text_total}] {label}")
+
     phase_roles = ["text"] + (["proofread"] if do_proof else [])
     phase_b = registry.begin_phase(*phase_roles)
     try:
-        print("      заголовки локаций…")
+        # 1) заголовки кластеров
         for day in days:
             for c in day.clusters:
-                c.title = (make_cluster_title(text, c) if c.description
-                           else (c.place or "Кадры"))
+                if c.description:
+                    text_step(f"заголовок · {c.place or '—'}")
+                    c.title = make_cluster_title(text, c)
+                else:
+                    c.title = c.place or "Кадры"
 
+        # 2) классификация major/minor
         if single_slide_days:
             for day in days:
                 day.major_clusters = day.clusters
@@ -1044,61 +1137,104 @@ def main():
                 classify_day_clusters(
                     day, significant_min_photos, significant_require_wiki)
 
+        # 3) сводки дня
         for day in days:
             places = [c.place for c in day.major_clusters if c.place]
             places = dedup_consecutive(places)
             day.places_summary = " → ".join(places)
             day.title = day.places_summary or day.date.strftime("%d.%m.%Y")
 
+        # 4) рассказы по локациям
         if not single_slide_days:
-            print("      рассказы по локациям…")
             for day in days:
                 for c in day.major_clusters:
                     if c.description or c.wiki:
-                        print(f"        · {day.date} · {c.place or '—'}")
+                        text_step(f"рассказ · {c.place or '—'}")
                         c.narrative = write_location_narrative(text, c, day)
 
+        # 5) вступления дней
         if not single_slide_days:
-            print("      вступления дней…")
             for day in days:
                 if len(day.major_clusters) >= day_intro_min_locations:
+                    text_step(f"вступление дня · {day.date.strftime('%d.%m')}")
                     day.day_intro = write_day_intro(text, day, day.distance_km)
                 elif day.major_clusters:
                     c = day.major_clusters[0]
                     if not c.narrative:
+                        text_step(f"рассказ (день) · {c.place or '—'}")
                         c.narrative = write_location_narrative(text, c, day)
 
+        # 6) обзор маршрута
         if generate_route_overview and len(days) > 1:
-            print("      обзор маршрута…")
+            text_step("обзор маршрута")
             route_overview = write_route_overview(text, days, total_km)
 
-        print("      пролог и финал…")
+        # 7) пролог и финал
+        text_step("пролог")
         intro = write_intro(text, days, total_km)
+        text_step("финал")
         finale = write_finale(text, days, total_km)
 
+        # 8) вычитка
         if do_proof:
-            print("      вычитка текстов…")
+            # считаем общее количество вызовов proofread
+            proof_total = 0
             for day in days:
                 if day.day_intro:
+                    proof_total += 1
+                for c in day.major_clusters:
+                    if c.narrative:
+                        proof_total += 1
+                    if c.description:
+                        proof_total += 1
+                for c in day.minor_clusters:
+                    if c.description:
+                        proof_total += 1
+            if intro:
+                proof_total += 1
+            if finale:
+                proof_total += 1
+            if route_overview:
+                proof_total += 1
+
+            proof_done = 0
+
+            def proof_step(label: str) -> None:
+                nonlocal proof_done
+                proof_done += 1
+                print(f"      [proofread {proof_done}/{proof_total}] {label}")
+
+            for day in days:
+                if day.day_intro:
+                    proof_step(f"вступление · {day.date.strftime('%d.%m')}")
                     day.day_intro = proofread_text(proofread, day.day_intro)
                 for c in day.major_clusters:
                     if c.narrative:
+                        proof_step(f"рассказ · {c.place or '—'}")
                         c.narrative = proofread_text(proofread, c.narrative)
                     if c.description:
+                        proof_step(f"описание · {c.place or '—'}")
                         c.description = proofread_text(proofread, c.description)
                 for c in day.minor_clusters:
                     if c.description:
+                        proof_step(f"описание (minor) · {c.place or '—'}")
                         c.description = proofread_text(proofread, c.description)
-            intro = proofread_text(proofread, intro)
-            finale = proofread_text(proofread, finale)
-            route_overview = proofread_text(proofread, route_overview)
+            if intro:
+                proof_step("пролог")
+                intro = proofread_text(proofread, intro)
+            if finale:
+                proof_step("финал")
+                finale = proofread_text(proofread, finale)
+            if route_overview:
+                proof_step("обзор маршрута")
+                route_overview = proofread_text(proofread, route_overview)
+        else:
+            route_overview = ""
+            # в этой ветке intro/finale остаются как сгенерированы
     finally:
         registry.end_phase(phase_b)
 
     # ---------- 7. Сборка структуры слайдов ----------
-    # Слайды содержат Photo-объекты в _photo_objs и метаданные в _photo_meta.
-    # Реальный экспорт и переименование — на следующем шаге, где известен
-    # номер слайда.
     print("[6/7] Собираю слайды")
 
     slides: list[dict] = []
@@ -1121,28 +1257,18 @@ def main():
 
     slides.append({"kind": "intro", "title": "Пролог", "text": intro})
 
+    # сводка маршрута — со сгруппированными днями
     if route_overview:
-        stops: list[dict] = []
-        for i, d in enumerate(days, 1):
-            places = [c.place for c in d.major_clusters if c.place]
-            places = dedup_consecutive(places)
-            if not places:
-                continue
-            stops.append({
-                "day": i,
-                "date": d.date.strftime("%d.%m"),
-                "place": " → ".join(places),
-                "km": f"{d.distance_km:.0f} км" if d.distance_km else "",
+        stops = build_route_stops(days)
+        if stops:
+            slides.append({
+                "kind": "overview",
+                "title": "Маршрут",
+                "narrative": route_overview,
+                "stops": stops,
             })
-        slides.append({
-            "kind": "overview",
-            "title": "Маршрут",
-            "narrative": route_overview,
-            "stops": stops,
-        })
 
     for i, day in enumerate(days, 1):
-        # карта: photo.path → cluster (для day-intro и transit)
         photo_to_cluster: dict[Path, Cluster] = {}
         for c in day.clusters:
             for p in c.photos:
@@ -1290,7 +1416,6 @@ def main():
             pass
 
     for s_idx, s in enumerate(slides, 1):
-        # ---- обложка ----
         cover_obj = s.pop("_cover_photo", None)
         if s.get("kind") == "cover":
             if cover_obj is not None:
@@ -1303,7 +1428,6 @@ def main():
             else:
                 s["photo"] = ""
 
-        # ---- обычные слайды ----
         photo_objs = s.pop("_photo_objs", None)
         photo_meta = s.pop("_photo_meta", None)
         if photo_objs is not None:
