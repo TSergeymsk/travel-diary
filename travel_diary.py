@@ -1084,8 +1084,21 @@ def main():
     # ---------- 6. ФАЗА B: TEXT + PROOFREAD ----------
     print("[5/7] Фаза B: тексты и вычитка")
 
+    # ---- Классификация major/minor ДО подсчёта вызовов ----
+    if single_slide_days:
+        for day in days:
+            day.major_clusters = day.clusters
+            day.minor_clusters = []
+            for c in day.clusters:
+                c.significant = True
+    else:
+        for day in days:
+            classify_day_clusters(
+                day, significant_min_photos, significant_require_wiki)
+
     # ---- Считаем общее количество LLM-вызовов заранее ----
     n_titles = sum(1 for d in days for c in d.clusters if c.description)
+
     n_narratives = 0
     n_day_intros = 0
     if not single_slide_days:
@@ -1105,7 +1118,6 @@ def main():
 
     do_proof = proofread is not None and not args.skip_proofread
 
-    # ---- Счётчики прогресса ----
     text_done = 0
 
     def text_step(label: str) -> None:
@@ -1125,26 +1137,14 @@ def main():
                 else:
                     c.title = c.place or "Кадры"
 
-        # 2) классификация major/minor
-        if single_slide_days:
-            for day in days:
-                day.major_clusters = day.clusters
-                day.minor_clusters = []
-                for c in day.clusters:
-                    c.significant = True
-        else:
-            for day in days:
-                classify_day_clusters(
-                    day, significant_min_photos, significant_require_wiki)
-
-        # 3) сводки дня
+        # 2) сводки дня
         for day in days:
             places = [c.place for c in day.major_clusters if c.place]
             places = dedup_consecutive(places)
             day.places_summary = " → ".join(places)
             day.title = day.places_summary or day.date.strftime("%d.%m.%Y")
 
-        # 4) рассказы по локациям
+        # 3) рассказы по локациям
         if not single_slide_days:
             for day in days:
                 for c in day.major_clusters:
@@ -1152,7 +1152,7 @@ def main():
                         text_step(f"рассказ · {c.place or '—'}")
                         c.narrative = write_location_narrative(text, c, day)
 
-        # 5) вступления дней
+        # 4) вступления дней
         if not single_slide_days:
             for day in days:
                 if len(day.major_clusters) >= day_intro_min_locations:
@@ -1164,20 +1164,20 @@ def main():
                         text_step(f"рассказ (день) · {c.place or '—'}")
                         c.narrative = write_location_narrative(text, c, day)
 
-        # 6) обзор маршрута
+        # 5) обзор маршрута
+        route_overview = ""
         if generate_route_overview and len(days) > 1:
             text_step("обзор маршрута")
             route_overview = write_route_overview(text, days, total_km)
 
-        # 7) пролог и финал
+        # 6) пролог и финал
         text_step("пролог")
         intro = write_intro(text, days, total_km)
         text_step("финал")
         finale = write_finale(text, days, total_km)
 
-        # 8) вычитка
+        # 7) вычитка
         if do_proof:
-            # считаем общее количество вызовов proofread
             proof_total = 0
             for day in days:
                 if day.day_intro:
@@ -1228,9 +1228,6 @@ def main():
             if route_overview:
                 proof_step("обзор маршрута")
                 route_overview = proofread_text(proofread, route_overview)
-        else:
-            route_overview = ""
-            # в этой ветке intro/finale остаются как сгенерированы
     finally:
         registry.end_phase(phase_b)
 
@@ -1257,7 +1254,6 @@ def main():
 
     slides.append({"kind": "intro", "title": "Пролог", "text": intro})
 
-    # сводка маршрута — со сгруппированными днями
     if route_overview:
         stops = build_route_stops(days)
         if stops:
